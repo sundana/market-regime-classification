@@ -1,4 +1,4 @@
-# Market Regime Classification — Baseline Pipeline
+# Market Regime Classification
 
 [![PyPI](https://img.shields.io/pypi/v/market-regime-classification.svg)](https://pypi.org/project/market-regime-classification/)
 [![Python versions](https://img.shields.io/pypi/pyversions/market-regime-classification.svg)](https://pypi.org/project/market-regime-classification/)
@@ -23,6 +23,52 @@ Distribution name: `market-regime-classification`.
 Import package: `market_regime_classification`.
 CLI command: `market-regime`.
 
+## Demo
+
+![Walk-forward diagnostics: detected regimes shaded on price, filtered state probabilities, and equity curves](https://raw.githubusercontent.com/sundana/market-regime-classification/main/docs/regimes-example.png)
+
+*Default synthetic run: HMM regimes shaded on price, causal filtered
+probabilities (no smoothing), and the walk-forward equity curves for all three
+detectors plus buy & hold.*
+
+```text
+$ uv run market-regime --source synthetic --outdir outputs
+Data: EQ+1 asset(s), 2007-09-24 -> 2026-11-20 (5000 rows, 4937 feature rows)
+Walk-forward: train=756d, refit every 63d, 3 states, features=[...]
+Fitting vol_threshold across walk-forward windows ...
+Fitting gmm across walk-forward windows ...
+Fitting hmm across walk-forward windows ...
+
+=== Economic scorecard (walk-forward, out-of-sample) ===
+     detector  n_days   cagr  ann_vol  sharpe  max_drawdown  turnover  switches_per_year
+vol_threshold    4180 0.0272   0.0858  0.3554       -0.2373    0.0324            16.2736
+          gmm    4180 0.0549   0.1288  0.4791       -0.3458    0.0507            20.7338
+          hmm    4180 0.0612   0.1296  0.5235       -0.3245    0.0169             7.5944
+     buy_hold    4180 0.0493   0.2298  0.3241       -0.5626    0.0000             0.0000
+...
+Figure: outputs/regimes.png
+```
+
+That excerpt is one seeded synthetic run (`--seed 42`), not a performance
+claim. On real data the ordering can and does change.
+
+## Contents
+
+- [Models included](#models-included)
+- [Install from PyPI](#install-from-pypi)
+- [Development setup (uv)](#development-setup-uv)
+- [Quick start](#quick-start)
+- [CLI options](#cli-options)
+- [What gets written](#what-gets-written)
+- [Features](#features)
+- [How to read the results](#how-to-read-the-results)
+- [Deliberate limitations](#deliberate-limitations)
+- [The trap this pipeline is built to avoid](#the-trap-this-pipeline-is-built-to-avoid)
+- [Project layout](#project-layout)
+- [Contributing](#contributing)
+- [Publishing to PyPI](#publishing-to-pypi)
+- [License](#license)
+
 ## Models included
 
 | Name | Type | Notes |
@@ -36,6 +82,8 @@ scorecard. If the ML models cannot beat a simple vol quantile rule
 out-of-sample, that is a finding, not a bug.
 
 ## Install from PyPI
+
+Requires Python 3.10 or newer.
 
 ```bash
 pip install market-regime-classification
@@ -54,7 +102,7 @@ pins the full resolution.
 # Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create .venv, install the project + dev dependencies from uv.lock
+# Create .venv and install the project + dev dependencies from uv.lock
 uv sync
 ```
 
@@ -93,6 +141,24 @@ If you need a plain requirements file for a non-uv environment:
 ```bash
 uv export --format requirements-txt --no-hashes > requirements.txt
 ```
+
+## CLI options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source {synthetic,yfinance,csv}` | `synthetic` | Data source. `synthetic` needs no network. |
+| `--tickers` | `SPY,TLT` | Comma-separated tickers for `--source yfinance`. |
+| `--start` | `2005-01-01` | Start date for `yfinance`. |
+| `--end` | today | End date for `yfinance`. |
+| `--csv` | `data/prices.csv` | Price CSV for `--source csv` (date index, one or more price columns). |
+| `--n-days` | `5000` | Synthetic history length. |
+| `--seed` | `42` | Random seed. |
+| `--train-days` | `756` | Trailing training window (~3 years). |
+| `--refit-every` | `63` | Out-of-sample days between refits (~quarterly). |
+| `--n-states` | `3` | Number of regimes; states are sorted lowest → highest volatility. |
+| `--detectors` | `vol_threshold,gmm,hmm` | Comma-separated detector subset. |
+| `--outdir` | `outputs` | Output directory (created if missing). |
+| `--no-plot` | off | Skip the diagnostic figure. |
 
 ## What gets written
 
@@ -165,33 +231,7 @@ after `t`. Plots look excellent; live results do not.
 only ever consumes data up to `t`. `tests/` includes a causality test that
 verifies truncating future rows does not change past probabilities.
 
-## Publishing to PyPI
-
-Build and validate locally:
-
-```bash
-uv build
-uvx twine check dist/*
-```
-
-Publish with an API token:
-
-```bash
-UV_PUBLISH_TOKEN=pypi-... uv publish
-```
-
-Or use the included GitHub Actions workflow
-(`.github/workflows/publish.yml`) with PyPI
-[Trusted Publishing](https://docs.pypi.org/trusted-publishers/): configure the
-PyPI project to trust this repository and the `publish` workflow, then publish
-a GitHub release. The workflow builds, runs `twine check`, and uploads via OIDC
-— no long-lived token in the repository.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Layout
+## Project layout
 
 ```
 pyproject.toml       # metadata, deps, console script, pytest/uv config
@@ -211,7 +251,52 @@ market_regime_classification/
 ├── plotting.py      # diagnostic figure
 └── run.py           # end-to-end CLI
 tests/
+├── test_package.py  # metadata + console-script registration
 ├── test_features.py
 ├── test_detectors.py
 └── test_walkforward.py
 ```
+
+## Contributing
+
+Bug reports, feature requests and pull requests are welcome at
+[github.com/sundana/market-regime-classification](https://github.com/sundana/market-regime-classification).
+
+Before opening a pull request:
+
+1. Fork the repo and create a branch from `main`.
+2. Run `uv sync`, make your change, and add or update tests.
+3. Run `uv run pytest -q` — the suite must pass.
+4. Keep changes focused; explain *why* in the PR description, especially for
+   anything that affects evaluation or could introduce look-ahead.
+
+For a new detector, implement the `BaseDetector` interface in
+`market_regime_classification/detectors.py`, register it in
+`make_detector()`, and add a causality test showing that truncating future
+rows does not change past labels or probabilities.
+
+## Publishing to PyPI
+
+Build and validate locally:
+
+```bash
+uv build
+uvx twine check dist/*
+```
+
+Publish with an API token:
+
+```bash
+UV_PUBLISH_TOKEN=pypi-... uv publish
+```
+
+Or use the included GitHub Actions workflow
+(`.github/workflows/publish.yml`) with PyPI
+[Trusted Publishing](https://docs.pypi.org/trusted-publishers/): configure the
+PyPI project to trust this repository and the `publish` workflow, then publish
+a GitHub release. The workflow runs the tests, builds, runs `twine check`, and
+uploads via OIDC — no long-lived token in the repository.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
