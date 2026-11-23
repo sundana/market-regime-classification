@@ -5,13 +5,18 @@ import pandas as pd
 import pytest
 
 from market_regime_classification.data import synthetic_market
-from market_regime_classification.detectors import GMMDetector, GaussianHMMDetector, VolThresholdDetector
+from market_regime_classification.detectors import (
+    GaussianHMMDetector,
+    GMMDetector,
+    VolThresholdDetector,
+)
 from market_regime_classification.evaluate import (
     compare_results,
     linear_weight_map,
     pairwise_agreement,
     perf_stats,
     regime_stats,
+    strategy_returns,
 )
 from market_regime_classification.features import build_features, daily_returns
 from market_regime_classification.walkforward import run_walkforward
@@ -38,7 +43,7 @@ def market():
 
 
 def test_walkforward_structure(market):
-    prices, features, _, _ = market
+    _, features, _, _ = market
     train_days, refit_every = 300, 50
 
     result = run_walkforward(
@@ -61,6 +66,7 @@ def test_walkforward_structure(market):
     assert len(result.refit_dates) == expected_refits
     assert np.allclose(result.probs.sum(axis=1), 1.0)
     assert set(result.labels.unique()) <= {0, 1, 2}
+    assert result.final_model is not None
 
 
 def test_walkforward_has_no_lookahead(market):
@@ -170,3 +176,66 @@ def test_compare_results_and_agreement(market):
 
     weights = linear_weight_map(3)
     assert weights == {0: 1.0, 1: 0.5, 2: 0.0}
+
+
+def test_strategy_returns_charges_cost_on_weight_changes() -> None:
+    index = pd.bdate_range("2020-01-01", periods=4)
+    labels = pd.Series([0, 0, 1, 1], index=index)
+    returns = pd.Series(0.01, index=index)
+    weight_map = {0: 1.0, 1: 0.0}
+
+    gross = strategy_returns(labels, returns, weight_map)
+    net = strategy_returns(labels, returns, weight_map, cost_bps=100.0)
+
+    # A 100% weight change at 100 bps costs 1% of the portfolio that day.
+    assert gross.tolist() == pytest.approx([0.01, 0.01, 0.0])
+    assert net.tolist() == pytest.approx([0.01, 0.01, -0.01])
+
+
+def test_strategy_returns_rejects_invalid_cost() -> None:
+    labels = pd.Series([0, 0], index=pd.bdate_range("2020-01-01", periods=2))
+    returns = pd.Series(0.01, index=labels.index)
+    with pytest.raises(ValueError, match="cost_bps"):
+        strategy_returns(labels, returns, {0: 1.0}, cost_bps=-1.0)
+
+
+def test_strategy_returns_rejects_unmapped_labels() -> None:
+    labels = pd.Series([0, 9], index=pd.bdate_range("2020-01-01", periods=2))
+    returns = pd.Series(0.01, index=labels.index)
+    with pytest.raises(ValueError, match="weight_map"):
+        strategy_returns(labels, returns, {0: 1.0})
+
+
+def test_compare_results_is_cost_aware(market) -> None:
+    _, features, returns, _ = market
+    kwargs = dict(
+        train_days=300,
+        refit_every=100,
+        feature_cols=FEATURE_COLS,
+        vol_col=VOL_COL,
+    )
+    result = run_walkforward(
+        features,
+        lambda: VolThresholdDetector(3),
+        name="vol_threshold",
+        **kwargs,
+    )
+
+    free = compare_results({"vol_threshold": result}, returns, 3)
+    costly = compare_results(
+        {"vol_threshold": result}, returns, 3, cost_bps=50.0
+    )
+
+    assert {"cost_bps", "gross_cagr", "gross_sharpe", "ann_cost"} <= set(
+        costly.columns
+    )
+    row = costly.loc[costly["detector"] == "vol_threshold"].iloc[0]
+    free_row = free.loc[free["detector"] == "vol_threshold"].iloc[0]
+    assert row["cost_bps"] == 50.0
+    assert row["ann_cost"] > 0.0
+    assert row["cagr"] <= row["gross_cagr"] + 1e-12
+    assert row["gross_sharpe"] == pytest.approx(free_row["sharpe"])
+
+    bh = costly.loc[costly["detector"] == "buy_hold"].iloc[0]
+    assert bh["cagr"] == pytest.approx(bh["gross_cagr"])
+    assert bh["ann_cost"] == 0.0

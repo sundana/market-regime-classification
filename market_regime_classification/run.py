@@ -12,13 +12,16 @@ Examples
 from __future__ import annotations
 
 import argparse
+import math
 import sys
+from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 
 import pandas as pd
 
 from .config import DEFAULT_DETECTORS, Config
-from .data import load_csv, load_yfinance, synthetic_market
+from .data import DEFAULT_MAX_STALE_DAYS, load_csv, load_yfinance, synthetic_market
 from .detectors import make_detector
 from .evaluate import (
     compare_results,
@@ -27,6 +30,8 @@ from .evaluate import (
     regime_stats,
 )
 from .features import build_features, daily_returns
+from .metadata import collect_run_metadata, write_run_metadata
+from .models import save_model
 from .plotting import plot_results
 from .walkforward import run_walkforward
 
@@ -62,6 +67,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="comma-separated: vol_threshold,gmm,hmm",
     )
     p.add_argument("--outdir", default="outputs", help="output directory")
+    p.add_argument(
+        "--cost-bps",
+        type=float,
+        default=0.0,
+        help=(
+            "one-way transaction cost in basis points charged on the absolute "
+            "weight change at each rebalance (default: 0)"
+        ),
+    )
+    p.add_argument(
+        "--save-models",
+        action="store_true",
+        help="write the final fitted model per detector to <outdir>/models/",
+    )
+    p.add_argument(
+        "--max-stale-days",
+        type=int,
+        default=DEFAULT_MAX_STALE_DAYS,
+        help=(
+            "maximum consecutive missing price days to forward-fill; "
+            f"longer gaps are an error (default: {DEFAULT_MAX_STALE_DAYS})"
+        ),
+    )
     p.add_argument("--no-plot", action="store_true", help="skip the diagnostic figure")
     return p.parse_args(argv)
 
@@ -70,10 +98,31 @@ def _load_data(args: argparse.Namespace) -> tuple[pd.DataFrame, pd.Series | None
     if args.source == "synthetic":
         return synthetic_market(n_days=args.n_days, seed=args.seed)
     if args.source == "yfinance":
-        return load_yfinance(args.tickers, start=args.start, end=args.end), None
+        return (
+            load_yfinance(
+                args.tickers,
+                start=args.start,
+                end=args.end,
+                max_stale_days=args.max_stale_days,
+            ),
+            None,
+        )
     if args.source == "csv":
-        return load_csv(args.csv), None
+        return load_csv(args.csv, max_stale_days=args.max_stale_days), None
     raise ValueError(args.source)
+
+
+def _source_metadata(args: argparse.Namespace) -> dict[str, object]:
+    if args.source == "synthetic":
+        return {"type": "synthetic", "n_days": args.n_days, "seed": args.seed}
+    if args.source == "yfinance":
+        return {
+            "type": "yfinance",
+            "tickers": args.tickers,
+            "start": args.start,
+            "end": args.end,
+        }
+    return {"type": "csv", "path": str(args.csv)}
 
 
 def _print_regime_tables(
@@ -86,7 +135,10 @@ def _print_regime_tables(
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    run_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parse_args(run_argv)
+    if not math.isfinite(args.cost_bps) or args.cost_bps < 0.0:
+        raise SystemExit("--cost-bps must be a finite non-negative number")
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -130,7 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     results = {}
     for name in detectors:
         print(f"Fitting {name} across walk-forward windows ...", flush=True)
-        factory = lambda name=name: make_detector(
+        factory = partial(
+            make_detector,
             name,
             n_states=cfg.n_states,
             random_state=cfg.random_state,
@@ -148,24 +201,52 @@ def main(argv: list[str] | None = None) -> int:
             vol_col=cfg.vol_col,
         )
 
+    written: list[Path] = []
+
+    if args.save_models:
+        for name, result in results.items():
+            if result.final_model is None:
+                raise RuntimeError(f"{name}: no fitted model to save")
+            written.append(
+                save_model(
+                    result.final_model,
+                    outdir / "models" / f"{name}.json",
+                )
+            )
+
     # Persist features and per-detector outputs.
-    features.to_csv(outdir / "features.csv")
+    features_path = outdir / "features.csv"
+    features.to_csv(features_path)
+    written.append(features_path)
     for name, result in results.items():
-        result.probs.to_csv(outdir / f"{name}_probabilities.csv")
-        result.labels.to_frame().to_csv(outdir / f"{name}_labels.csv")
+        probs_path = outdir / f"{name}_probabilities.csv"
+        labels_path = outdir / f"{name}_labels.csv"
+        stats_path = outdir / f"{name}_regime_stats.csv"
+        result.probs.to_csv(probs_path)
+        result.labels.to_frame().to_csv(labels_path)
         regime_stats(
             result.labels, returns, primary_prices, cfg.n_states
-        ).to_csv(outdir / f"{name}_regime_stats.csv", index=False)
+        ).to_csv(stats_path, index=False)
+        written.extend([probs_path, labels_path, stats_path])
 
     if true_state is not None:
-        true_state.to_csv(outdir / "true_states.csv")
+        true_states_path = outdir / "true_states.csv"
+        true_state.to_csv(true_states_path)
+        written.append(true_states_path)
 
-    metrics = compare_results(results, returns, cfg.n_states)
-    metrics.to_csv(outdir / "metrics.csv", index=False)
-    metrics.to_json(outdir / "metrics.json", orient="records", indent=2)
+    metrics = compare_results(
+        results, returns, cfg.n_states, cost_bps=args.cost_bps
+    )
+    metrics_csv = outdir / "metrics.csv"
+    metrics_json = outdir / "metrics.json"
+    metrics.to_csv(metrics_csv, index=False)
+    metrics.to_json(metrics_json, orient="records", indent=2)
+    written.extend([metrics_csv, metrics_json])
 
     agreement = pairwise_agreement(results)
-    agreement.to_csv(outdir / "agreement.csv")
+    agreement_path = outdir / "agreement.csv"
+    agreement.to_csv(agreement_path)
+    written.append(agreement_path)
 
     print("\n=== Economic scorecard (walk-forward, out-of-sample) ===")
     print(metrics.to_string(index=False, float_format=lambda v: f"{v:0.4f}"))
@@ -200,8 +281,27 @@ def main(argv: list[str] | None = None) -> int:
             outdir / "regimes.png",
             weight_map=weight_map,
             n_states=cfg.n_states,
+            cost_bps=args.cost_bps,
         )
+        written.append(Path(outpath))
         print(f"\nFigure: {outpath}")
+
+    metadata = collect_run_metadata(
+        argv=run_argv,
+        config={
+            **asdict(cfg),
+            "feature_cols": feature_cols,
+            "detectors": detectors,
+            "max_stale_days": args.max_stale_days,
+            "cost_bps": args.cost_bps,
+            "save_models": args.save_models,
+        },
+        source=_source_metadata(args),
+        outputs=written,
+        base_dir=outdir,
+    )
+    metadata_path = write_run_metadata(outdir, metadata)
+    print(f"Metadata: {metadata_path}")
 
     print(f"\nOutputs written to {outdir.resolve()}")
     return 0

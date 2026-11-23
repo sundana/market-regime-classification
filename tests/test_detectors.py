@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 
 from market_regime_classification.data import synthetic_market
 from market_regime_classification.detectors import (
-    GMMDetector,
     GaussianHMMDetector,
+    GMMDetector,
     VolThresholdDetector,
     make_detector,
 )
@@ -65,7 +64,7 @@ def test_gmm(data):
     P = det.predict(test, FEATURE_COLS)
     _check_probs(P, len(test), 3)
 
-    ordered_means = det.gmm_.means_[det.order_, det.vol_idx_]
+    ordered_means = det.means_[det.order_, det.vol_idx_]
     assert np.all(np.diff(ordered_means) >= 0)
 
 

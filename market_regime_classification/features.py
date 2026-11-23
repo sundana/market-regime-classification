@@ -42,8 +42,13 @@ def build_features(prices: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("prices must be strictly positive")
 
     primary = prices.columns[0]
-    log_px = np.log(prices[primary])
-    rets = np.log(prices).diff()
+    log_prices = pd.DataFrame(
+        np.log(prices.to_numpy(dtype=float)),
+        index=prices.index,
+        columns=prices.columns,
+    )
+    log_px = log_prices[primary]
+    rets = log_prices.diff()
 
     f = pd.DataFrame(index=prices.index)
 

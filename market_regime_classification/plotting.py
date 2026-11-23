@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
+import numpy as np
+import pandas as pd
+from matplotlib.axes import Axes
+from matplotlib.colors import to_hex
 
 matplotlib.use("Agg")  # headless-safe
 
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 
 from .evaluate import linear_weight_map, strategy_returns
 from .walkforward import WalkForwardResult
@@ -23,10 +25,10 @@ def _colors(n_states: int) -> list[str]:
     if n_states <= len(_STATE_COLORS):
         return _STATE_COLORS[:n_states]
     cmap = plt.get_cmap("tab10")
-    return [cmap(i % 10) for i in range(n_states)]
+    return [to_hex(cmap(i % 10)) for i in range(n_states)]
 
 
-def _shade_regimes(ax, labels: pd.Series, colors: list[str]) -> None:
+def _shade_regimes(ax: Axes, labels: pd.Series, colors: list[str]) -> None:
     """Shade contiguous runs of the same state."""
     if labels.empty:
         return
@@ -53,6 +55,7 @@ def plot_results(
     outpath: str | Path,
     weight_map: dict[int, float] | None = None,
     n_states: int = 3,
+    cost_bps: float = 0.0,
 ) -> Path:
     if not results:
         raise ValueError("no results to plot")
@@ -117,7 +120,9 @@ def plot_results(
     ax = axes[2]
     used_dates = None
     for i, (name, result) in enumerate(results.items()):
-        strat = strategy_returns(result.labels, returns, weight_map)
+        strat = strategy_returns(
+            result.labels, returns, weight_map, cost_bps=cost_bps
+        )
         equity = (1.0 + strat).cumprod()
         ax.plot(
             equity.index,
@@ -141,7 +146,11 @@ def plot_results(
         )
     ax.set_yscale("log")
     ax.set_ylabel("Equity (log scale)")
-    ax.set_title("Toy allocation: state 0 = 100% risk asset ... last state = 0%")
+    cost_note = f", net of {cost_bps:g} bps" if cost_bps else ""
+    ax.set_title(
+        "Toy allocation: state 0 = 100% risk asset ... last state = 0%"
+        f"{cost_note}"
+    )
     ax.legend(loc="upper left", fontsize=8)
 
     fig.tight_layout()

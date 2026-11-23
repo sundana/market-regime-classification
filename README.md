@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/market-regime-classification.svg)](https://pypi.org/project/market-regime-classification/)
 [![Python versions](https://img.shields.io/pypi/pyversions/market-regime-classification.svg)](https://pypi.org/project/market-regime-classification/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/sundana/market-regime-classification/actions/workflows/ci.yml/badge.svg)](https://github.com/sundana/market-regime-classification/actions/workflows/ci.yml)
 
 A causal, walk-forward baseline for **detecting market regimes** with a
 volatility rule, a Gaussian mixture, and a Gaussian HMM — plus the evaluation
@@ -18,6 +19,10 @@ regime research usually gets wrong:
 - **Economic evaluation.** "Regime" has no ground truth, so classification
   accuracy is mostly meaningless. The question is whether regime-conditional
   allocations improve risk-adjusted return at acceptable turnover.
+
+Fitted detectors can be exported to schema-versioned JSON and applied to new
+data with the `market-regime-score` CLI, and the economic scorecard can charge
+a flat per-rebalance transaction cost.
 
 | | |
 |:---|:---|
@@ -43,17 +48,19 @@ Fitting gmm across walk-forward windows ...
 Fitting hmm across walk-forward windows ...
 
 === Economic scorecard (walk-forward, out-of-sample) ===
-     detector  n_days   cagr  ann_vol  sharpe  max_drawdown  turnover  switches_per_year
-vol_threshold    4180 0.0272   0.0858  0.3554       -0.2373    0.0324            16.2736
-          gmm    4180 0.0549   0.1288  0.4791       -0.3458    0.0507            20.7338
-          hmm    4180 0.0612   0.1296  0.5235       -0.3245    0.0169             7.5944
-     buy_hold    4180 0.0493   0.2298  0.3241       -0.5626    0.0000             0.0000
+     detector  n_days   cagr  ann_vol  sharpe  max_drawdown  turnover  switches_per_year  cost_bps  gross_cagr  gross_sharpe  ann_cost
+vol_threshold    4180 0.0272   0.0858  0.3554       -0.2373    0.0324            16.2736    0.0000      0.0272        0.3554    0.0000
+          gmm    4180 0.0549   0.1288  0.4791       -0.3458    0.0507            20.7338    0.0000      0.0549        0.4791    0.0000
+          hmm    4180 0.0612   0.1296  0.5235       -0.3245    0.0169             7.5944    0.0000      0.0612        0.5235    0.0000
+     buy_hold    4180 0.0493   0.2298  0.3241       -0.5626    0.0000             0.0000    0.0000      0.0493        0.3241    0.0000
 ...
 Figure: outputs/regimes.png
 ```
 
 That excerpt is one seeded synthetic run (`--seed 42`), not a performance
-claim. On real data the ordering can and does change.
+claim. On real data the ordering can and does change. The printed table is
+truncated here to the headline columns; the CLI also emits `calmar`,
+`hit_rate`, and `avg_state`.
 
 ## Models
 
@@ -77,8 +84,12 @@ volatility after every refit, so `state_0` is always the calmest regime.
 - [Quick start](#quick-start)
 - [CLI options](#cli-options)
 - [Outputs](#outputs)
+- [Data validation](#data-validation)
 - [Engineered features](#engineered-features)
 - [Python API](#python-api)
+- [Saving and reusing fitted models](#saving-and-reusing-fitted-models)
+- [Scoring new data with the CLI](#scoring-new-data-with-the-cli)
+- [Transaction costs and the scorecard](#transaction-costs-and-the-scorecard)
 - [Reading the results](#reading-the-results)
 - [Deliberate limitations](#deliberate-limitations)
 - [The look-ahead trap](#the-look-ahead-trap)
@@ -123,14 +134,24 @@ uv run market-regime --source yfinance --tickers SPY,TLT \
     --start 2005-01-01 --outdir outputs
 
 # Your own price CSV (date in the first column, then one or more price columns)
-uv run market-regime --source csv --csv data/prices.csv --outdir outputs
+uv run market-regime --source csv --csv data/prices.csv \
+    --save-models --outdir outputs
+
+# Score new data with a saved model
+uv run market-regime-score --model outputs/models/hmm.json \
+    --csv data/prices.csv --outdir scores
 ```
 
-`uv run market-regime` invokes the console script declared in `pyproject.toml`:
+Add `--cost-bps 5` to charge 5 bps per unit of weight change. `--save-models`
+exports the final fitted model per detector to `outputs/models/`.
+
+`uv run market-regime` and `uv run market-regime-score` invoke the console
+scripts declared in `pyproject.toml`:
 
 ```toml
 [project.scripts]
 market-regime = "market_regime_classification.run:main"
+market-regime-score = "market_regime_classification.score:main"
 ```
 
 `python -m market_regime_classification.run ...` is equivalent. Run the tests
@@ -162,6 +183,9 @@ uv export --format requirements-txt --no-hashes > requirements.txt
 | `--n-states` | `3` | Number of regimes; states sorted lowest → highest volatility. |
 | `--detectors` | `vol_threshold,gmm,hmm` | Comma-separated detector subset. |
 | `--outdir` | `outputs` | Output directory (created if missing). |
+| `--cost-bps` | `0` | One-way transaction cost in basis points charged on the absolute weight change at each rebalance. |
+| `--save-models` | off | Write the final fitted model per detector to `models/`. |
+| `--max-stale-days` | `5` | Maximum consecutive missing price days to forward-fill; longer gaps are an error. |
 | `--no-plot` | off | Skip the diagnostic figure. |
 
 ## Outputs
@@ -178,13 +202,42 @@ outputs/
 ├── metrics.json
 ├── agreement.csv            # pairwise adjusted Rand index between detectors
 ├── regimes.png              # price shading, filtered probabilities, equity curves
-└── true_states.csv          # synthetic source only
+├── true_states.csv          # synthetic source only
+├── models/                  # --save-models only: final fitted model per detector
+└── run_metadata.json        # provenance: versions, git SHA, argv, config, output hashes
 ```
 
 `metrics.csv` reports `cagr`, `ann_vol`, `sharpe`, `max_drawdown`, `calmar`,
-`hit_rate`, `turnover`, `switches_per_year`, and `avg_state` for each detector
-and for buy & hold. `*_regime_stats.csv` reports occupancy, run length, and
-forward 21-day volatility/return per state.
+`hit_rate`, `turnover`, `switches_per_year`, `avg_state`, `cost_bps`,
+`gross_cagr`, `gross_sharpe`, and `ann_cost` for each detector and for buy &
+hold. `*_regime_stats.csv` reports occupancy, run length, and forward 21-day
+volatility/return per state.
+
+`run_metadata.json` makes each run auditable and reproducible. It records the
+package and Python versions, platform, git revision and dirty flag, the exact
+`argv`, the resolved configuration, the data-source parameters, and a SHA-256
+digest plus byte size for every other output file (it excludes itself).
+
+## Data validation
+
+The real-data loaders (`--source csv` and `--source yfinance`) reject inputs
+that would silently distort the regime features:
+
+- duplicate or missing dates, duplicate columns, and non-numeric prices;
+- NaN, infinite, zero, or negative prices;
+- a column with no usable observations at all.
+
+History before the first date on which **every** asset has a price is trimmed
+rather than back-filled, so a later-listed ticker shortens the sample instead
+of inventing history. Interior gaps are forward-filled for at most
+`--max-stale-days` consecutive observations (default 5); longer gaps raise an
+error naming the affected columns and first date. Set `--max-stale-days 0` to
+reject any gap at all. This prevents a stale price from masquerading as zero
+volatility.
+
+`--source yfinance` retries transient download failures with exponential
+backoff before applying the same validation. The `synthetic` source is
+generated in-process and is valid by construction.
 
 ## Engineered features
 
@@ -231,7 +284,112 @@ print(result.probs.tail())
 ```
 
 `result.probs` is indexed by out-of-sample date with one `state_k` column per
-regime; `result.labels` is the per-day argmax.
+regime; `result.labels` is the per-day argmax. `result.final_model` is the last
+refitted detector, which can be passed to `save_model`.
+
+## Saving and reusing fitted models
+
+`--save-models` writes the **last refit** of each detector to
+`outputs/models/<detector>.json`. The format is schema-versioned JSON, not
+pickle, so artifacts are inspectable, diffable, and safe to load:
+
+```bash
+uv run market-regime --source csv --csv data/prices.csv \
+    --cost-bps 5 --save-models --outdir outputs
+```
+
+Each artifact records the detector name, `n_states`, the exact feature and
+volatility-column contract, the training-window dates and row count, the
+fitted scaler, and the model parameters. It also carries the creating package
+version and a UTC timestamp, and is written atomically. Loading validates the
+schema version, array shapes, probability normalization, state permutation,
+and scaler scale.
+
+Score new observations in Python:
+
+```python
+from market_regime_classification.models import load_model
+
+model = load_model("outputs/models/hmm.json")
+probs = model.predict(
+    new_features,
+    feature_cols=model.feature_cols_,
+    init_probs=last_filtered_probs,  # optional state carried from the prior block
+)
+labels = probs.argmax(axis=1)
+```
+
+`new_features` must contain the same columns the model was fitted on. A saved
+model is a frozen snapshot of one refit; it does not update itself. For
+production use, rerun the walk-forward at your refit cadence and reload the
+new artifact.
+
+## Scoring new data with the CLI
+
+`market-regime-score` applies a frozen model to new price history without
+refitting:
+
+```bash
+# Train and export the final refit
+uv run market-regime --source csv --csv data/prices.csv \
+    --save-models --outdir outputs
+
+# Score a trailing window with the saved HMM
+uv run market-regime-score \
+    --model outputs/models/hmm.json \
+    --csv data/prices.csv \
+    --outdir scores
+```
+
+Outputs:
+
+```text
+scores/
+├── scores.csv        # one row per date: state_0..state_k, label
+├── features.csv      # the exact feature frame used for scoring
+├── last_probs.json   # final filtered vector, for the next scoring block
+└── run_metadata.json # argv, model SHA-256, input source, output hashes
+```
+
+Pass a trailing price window long enough for the 63-day feature warmup (at
+least 80 rows; more if the model uses `rv_63`). Multi-asset models require the
+same asset columns, in the same order, as training. The scoring CLI supports
+`--source csv` and `--source yfinance`.
+
+For continuous inference, feed the previous final state forward:
+
+```bash
+uv run market-regime-score \
+    --model outputs/models/hmm.json \
+    --csv data/prices.csv \
+    --init-probs scores/last_probs.json \
+    --outdir scores
+```
+
+`--init-probs` accepts a bare JSON list or a `last_probs.json` object. It
+continues the HMM forward filter from the prior block; the GMM and volatility
+rule ignore it. The CLI never refits: rerun the walk-forward at your refit
+cadence and reload the new artifact.
+
+## Transaction costs and the scorecard
+
+The economic scorecard charges a flat one-way cost on the absolute weight
+change at each rebalance:
+
+```bash
+uv run market-regime --source csv --csv data/prices.csv --cost-bps 5
+```
+
+`--cost-bps` is in basis points (5 = 0.05%). You can fold commissions and
+average slippage into the same number. The opening position at the first
+out-of-sample date is not charged, so the strategy and buy & hold follow the
+same convention. Headline `cagr`, `sharpe`, `max_drawdown`, and `calmar` are
+**net** of costs; `gross_cagr` and `gross_sharpe` repeat the same metrics
+before costs; `ann_cost` is the annualized cost drag as a fraction of the
+portfolio. Buy & hold has no rebalancing cost (`ann_cost = 0`).
+
+The model still ignores market impact, borrow/financing costs, taxes, and cash
+yield, and the allocation rule remains a diagnostic, not a strategy.
 
 ## Reading the results
 
@@ -241,8 +399,10 @@ regime; `result.labels` is the per-day argmax.
   return by regime. Good separation here is the main evidence the detector
   found something.
 - **Sharpe / MaxDD / turnover** — the toy allocator maps state 0 → 100%
-  equity, middle states linearly, last state → 0%. It ignores costs, cash
-  yield, and slippage; treat it as a diagnostic, not a strategy.
+  equity, middle states linearly, last state → 0%. `--cost-bps` charges a flat
+  cost on the absolute weight change; `gross_sharpe` shows the before-cost
+  figure and `ann_cost` the annualized drag. Market impact, financing, taxes,
+  and cash yield are still ignored; treat it as a diagnostic, not a strategy.
 - **ARI between detectors** — how much the models agree. Very high agreement
   with little economic difference means the HMM is not earning its complexity.
 
@@ -254,16 +414,19 @@ regime-conditional forward volatility/return and the economic scorecard.
 
 ## Deliberate limitations
 
-This is a baseline, not a production system:
+This is a research baseline, not a production trading system:
 
 - Single asset target; multi-asset regime work needs covariance/correlation
   state modeling.
-- No transaction costs, borrow costs, or cash yield in the scorecard.
+- Costs are a flat bps charge on the absolute weight change; there is no
+  market-impact model, borrow/financing cost, tax, or cash yield.
 - No hyperparameter search. `n_states`, `train_days`, and `refit_every` are
   fixed by CLI flags; choosing them on the test period would be data snooping.
 - The HMM is full-covariance with light regularization. It can still find
   local optima; `n_init` restarts mitigate but do not eliminate this.
 - The synthetic generator is a sanity check, not evidence about real markets.
+- Saved models are snapshots of one refit with no online updating; you own the
+  refit cadence and monitoring.
 
 ## The look-ahead trap
 
@@ -286,21 +449,30 @@ uv.lock              # pinned dependency resolution (commit this)
 LICENSE              # MIT
 MANIFEST.in          # files included in the sdist
 .github/workflows/
-└── publish.yml      # tests, build, PyPI trusted publishing
+├── ci.yml           # lint, type-check, and tests on Python 3.10-3.13
+└── publish.yml      # lint, type-check, tests, build, PyPI trusted publishing
 market_regime_classification/
 ├── config.py        # CLI/config defaults
-├── data.py          # synthetic generator, yfinance loader, CSV loader
+├── data.py          # synthetic generator, validated yfinance/CSV loaders
 ├── features.py      # feature engineering
 ├── detectors.py     # vol-threshold, GMM, causal Gaussian HMM
 ├── walkforward.py   # rolling refit / out-of-sample harness
-├── evaluate.py      # regime stats + economic scorecard
+├── evaluate.py      # regime stats + cost-aware economic scorecard
+├── metadata.py      # run provenance (versions, git SHA, config, hashes)
+├── models.py        # schema-versioned JSON save/load for fitted detectors
 ├── plotting.py      # diagnostic figure
-└── run.py           # end-to-end CLI
+├── run.py           # end-to-end training/evaluation CLI
+└── score.py         # inference CLI for saved models
 tests/
 ├── test_package.py  # metadata + console-script registration
 ├── test_features.py
 ├── test_detectors.py
-└── test_walkforward.py
+├── test_walkforward.py
+├── test_data.py     # loader validation and gap handling
+├── test_metadata.py # provenance record + output hashing
+├── test_models.py   # model round-trip and payload validation
+├── test_score.py    # scoring CLI and state carry-forward
+└── test_cli.py      # end-to-end CLI including costs, models, metadata
 ```
 
 ## Testing and contributing
@@ -312,17 +484,27 @@ Before opening a pull request:
 
 1. Fork the repo and create a branch from `main`.
 2. Run `uv sync`, make your change, and add or update tests.
-3. Run `uv run pytest -q`; the suite must pass.
+3. Run the full gate: `uv run ruff check .`, `uv run mypy`, and
+   `uv run pytest -q`.
 4. Keep changes focused and explain *why* in the PR description, especially
    for anything that affects evaluation or could introduce look-ahead.
 
-The suite covers feature causality, walk-forward structure, HMM filtering
-continuity, scorecard math, and package/console-script registration.
+CI runs lint and type-check once and the test suite on Python 3.10-3.13 for
+every push to `main` and every pull request. The publish workflow runs the same
+gate before uploading a release.
 
-To add a detector, implement the `BaseDetector` interface in
-`market_regime_classification/detectors.py`, register it in `make_detector()`,
-and add a causality test showing that truncating future rows does not change
-past labels or probabilities.
+The suite covers feature causality, walk-forward structure, HMM filtering
+continuity, scorecard math (including cost accounting), package/console-script
+registration, loader validation (duplicate dates, non-positive prices, bounded
+gap filling), run metadata/output hashing, model save/load round trips and
+payload validation, the scoring CLI (including state carry-forward), and the
+end-to-end training CLI.
+
+To add a detector, implement the `BaseDetector` interface (including
+`_params_dict` and `from_dict`) in
+`market_regime_classification/detectors.py`, register it in `make_detector()`
+and `models.py`, and add a causality test showing that truncating future rows
+does not change past labels or probabilities.
 
 ## Publishing to PyPI
 
@@ -342,9 +524,10 @@ UV_PUBLISH_TOKEN=pypi-... uv publish
 Or use `.github/workflows/publish.yml` with PyPI
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/). The workflow
 runs on `v*` tags, published GitHub releases, or manual dispatch; it installs
-locked dependencies, runs the tests, builds, runs `twine check`, and uploads
-via OIDC — no long-lived token in the repository. Configure the PyPI project to
-trust this repository and the `publish` workflow before tagging a release.
+locked dependencies, runs lint, type-check, and the tests, builds, runs
+`twine check`, and uploads via OIDC — no long-lived token in the repository.
+Configure the PyPI project to trust this repository and the `publish` workflow
+before tagging a release.
 
 ## License
 

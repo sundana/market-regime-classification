@@ -14,3 +14,10 @@ def test_console_script_is_registered():
     matching = [ep for ep in scripts if ep.name == "market-regime"]
     assert matching, "market-regime console script is not installed"
     assert matching[0].value == "market_regime_classification.run:main"
+
+
+def test_score_console_script_is_registered():
+    scripts = entry_points(group="console_scripts")
+    matching = [ep for ep in scripts if ep.name == "market-regime-score"]
+    assert matching, "market-regime-score console script is not installed"
+    assert matching[0].value == "market_regime_classification.score:main"

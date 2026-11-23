@@ -14,8 +14,9 @@ predictions are invariant to truncating the dataset after the row in question.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Protocol
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,7 @@ import pandas as pd
 class _Detector(Protocol):
     n_states: int
 
-    def fit(self, X: pd.DataFrame, feature_cols: list[str], vol_col: str): ...
+    def fit(self, X: pd.DataFrame, feature_cols: list[str], vol_col: str) -> _Detector: ...
 
     def predict(
         self,
@@ -40,6 +41,7 @@ class WalkForwardResult:
     probs: pd.DataFrame  # index = OOS dates, columns = state_0..state_k
     labels: pd.Series  # argmax state per OOS date
     refit_dates: list[pd.Timestamp]
+    final_model: object | None = None  # last refitted detector, for serialization
 
     def __post_init__(self) -> None:
         if len(self.probs) != len(self.labels):
@@ -75,6 +77,7 @@ def run_walkforward(
 
     previous_probs: np.ndarray | None = None
     n_states: int | None = None
+    final_model: object | None = None
 
     for block_start in range(train_days, n, refit_every):
         block_end = min(block_start + refit_every, n)
@@ -83,6 +86,7 @@ def run_walkforward(
 
         detector = detector_factory()
         detector.fit(train, feature_cols=feature_cols, vol_col=vol_col)
+        final_model = detector
         probs = np.asarray(
             detector.predict(
                 test, feature_cols=feature_cols, init_probs=previous_probs
@@ -116,5 +120,9 @@ def run_walkforward(
     labels = pd.Series(P.to_numpy().argmax(axis=1), index=P.index, name="state")
 
     return WalkForwardResult(
-        name=name, probs=P, labels=labels, refit_dates=refit_dates
+        name=name,
+        probs=P,
+        labels=labels,
+        refit_dates=refit_dates,
+        final_model=final_model,
     )

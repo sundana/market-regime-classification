@@ -17,12 +17,69 @@ the calmest regime in every model and after every refit.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
+
+MODEL_SCHEMA_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers
+# ---------------------------------------------------------------------------
+def _index_label(value: object) -> str:
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
+def _as_float_array(
+    value: object, *, name: str, shape: tuple[int, ...] | None = None
+) -> np.ndarray:
+    try:
+        array = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a numeric array") from exc
+    if shape is not None and array.shape != shape:
+        raise ValueError(f"{name} has shape {array.shape}, expected {shape}")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} contains non-finite values")
+    return array
+
+
+def _as_prob_vector(value: object, *, name: str, size: int) -> np.ndarray:
+    array = _as_float_array(value, name=name, shape=(size,))
+    if (array < 0.0).any() or not np.isclose(array.sum(), 1.0, atol=1e-8):
+        raise ValueError(f"{name} must be a probability vector of length {size}")
+    return array
+
+
+def _as_prob_matrix(value: object, *, name: str, size: int) -> np.ndarray:
+    array = _as_float_array(value, name=name, shape=(size, size))
+    if (array < 0.0).any() or not np.allclose(
+        array.sum(axis=1), 1.0, atol=1e-8
+    ):
+        raise ValueError(f"{name} must be a {size}x{size} row-stochastic matrix")
+    return array
+
+
+def _as_permutation(value: object, *, name: str, size: int) -> np.ndarray:
+    array = _as_float_array(value, name=name, shape=(size,))
+    as_int = array.astype(int)
+    if not np.array_equal(array, as_int) or sorted(as_int.tolist()) != list(
+        range(size)
+    ):
+        raise ValueError(f"{name} must be a permutation of 0..{size - 1}")
+    return as_int
+
+
+def _check_symmetric_covars(covars: np.ndarray, *, name: str) -> None:
+    if not np.allclose(covars, np.swapaxes(covars, 1, 2), atol=1e-8):
+        raise ValueError(f"{name} must contain symmetric covariance matrices")
 
 
 # ---------------------------------------------------------------------------
@@ -32,14 +89,16 @@ def _logsumexp(a: np.ndarray, axis: int | None = None) -> np.ndarray | float:
     """Stable log-sum-exp that tolerates ``-inf`` entries."""
     a = np.asarray(a, dtype=float)
     if axis is None:
-        m = float(np.max(a))
-        if not np.isfinite(m):
-            return m
-        return float(m + np.log(np.sum(np.exp(a - m))))
-    m = np.max(a, axis=axis, keepdims=True)
-    m = np.where(np.isfinite(m), m, 0.0)
-    out = m + np.log(np.sum(np.exp(a - m), axis=axis, keepdims=True))
-    return np.squeeze(out, axis=axis)
+        scalar_max = float(np.max(a))
+        if not np.isfinite(scalar_max):
+            return scalar_max
+        return float(scalar_max + np.log(np.sum(np.exp(a - scalar_max))))
+    row_max = np.max(a, axis=axis, keepdims=True)
+    safe_max = np.where(np.isfinite(row_max), row_max, 0.0)
+    total = safe_max + np.log(
+        np.sum(np.exp(a - safe_max), axis=axis, keepdims=True)
+    )
+    return np.squeeze(total, axis=axis)
 
 
 def _safe_cholesky(cov: np.ndarray) -> np.ndarray:
@@ -88,6 +147,9 @@ class BaseDetector(ABC):
         if n_states < 2:
             raise ValueError("n_states must be >= 2")
         self.n_states = int(n_states)
+        self.feature_cols_: list[str] = []
+        self.vol_col_: str = ""
+        self.fitted_on_: dict[str, str | int] | None = None
 
     @staticmethod
     def _matrix(X: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
@@ -99,10 +161,124 @@ class BaseDetector(ABC):
             raise ValueError("feature matrix contains NaN or infinite values")
         return M
 
+    def _record_fit_window(self, X: pd.DataFrame) -> None:
+        if len(X) == 0:
+            self.fitted_on_ = None
+            return
+        self.fitted_on_ = {
+            "start": _index_label(X.index[0]),
+            "end": _index_label(X.index[-1]),
+            "rows": len(X),
+        }
+
+    # -- serialization ------------------------------------------------------
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the fitted model to a JSON-safe dictionary."""
+        if not self.feature_cols_ or not self.vol_col_:
+            raise RuntimeError("detector must be fitted before serialization")
+        return {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "detector": self.name,
+            "n_states": self.n_states,
+            "feature_cols": list(self.feature_cols_),
+            "vol_col": self.vol_col_,
+            "fitted_on": self.fitted_on_,
+            "params": self._params_dict(),
+        }
+
+    @abstractmethod
+    def _params_dict(self) -> dict[str, Any]:
+        ...
+
+    @classmethod
+    def _validate_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> tuple[
+        int, list[str], str, Mapping[str, Any], dict[str, Any] | None
+    ]:
+        if not isinstance(payload, Mapping):
+            raise TypeError("model payload must be a mapping")
+        version = payload.get("schema_version")
+        if version != MODEL_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported model schema_version={version!r}; "
+                f"expected {MODEL_SCHEMA_VERSION}"
+            )
+        detector = payload.get("detector")
+        if detector != cls.name:
+            raise ValueError(
+                f"payload detector={detector!r} does not match {cls.name!r}"
+            )
+        n_states = payload.get("n_states")
+        if (
+            not isinstance(n_states, int)
+            or isinstance(n_states, bool)
+            or n_states < 2
+        ):
+            raise ValueError("n_states must be an integer >= 2")
+        feature_cols = payload.get("feature_cols")
+        if (
+            not isinstance(feature_cols, list)
+            or not feature_cols
+            or not all(isinstance(col, str) for col in feature_cols)
+        ):
+            raise ValueError("feature_cols must be a non-empty list of strings")
+        if len(set(feature_cols)) != len(feature_cols):
+            raise ValueError("feature_cols must be unique")
+        vol_col = payload.get("vol_col")
+        if not isinstance(vol_col, str) or vol_col not in feature_cols:
+            raise ValueError("vol_col must be one of feature_cols")
+        params = payload.get("params")
+        if not isinstance(params, Mapping):
+            raise ValueError("params must be a mapping")
+        fitted_on = payload.get("fitted_on")
+        if fitted_on is not None and not isinstance(fitted_on, Mapping):
+            raise ValueError("fitted_on must be a mapping or null")
+        return (
+            n_states,
+            list(feature_cols),
+            vol_col,
+            params,
+            dict(fitted_on) if fitted_on is not None else None,
+        )
+
+    def _serialize_scaler(self) -> dict[str, list[float]]:
+        return {
+            "scaler_mean": np.asarray(self.scaler_.mean_, dtype=float).tolist(),
+            "scaler_scale": np.asarray(self.scaler_.scale_, dtype=float).tolist(),
+        }
+
+    def _restore_scaler(
+        self, params: Mapping[str, Any], n_features: int
+    ) -> None:
+        mean = _as_float_array(
+            params.get("scaler_mean"),
+            name="scaler_mean",
+            shape=(n_features,),
+        )
+        scale = _as_float_array(
+            params.get("scaler_scale"),
+            name="scaler_scale",
+            shape=(n_features,),
+        )
+        if (scale <= 0.0).any():
+            raise ValueError("scaler_scale must be strictly positive")
+        scaler = StandardScaler()
+        scaler.mean_ = mean
+        scaler.scale_ = scale
+        scaler.var_ = scale**2
+        scaler.n_features_in_ = n_features
+        self.scaler_ = scaler
+
+    @classmethod
+    @abstractmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> BaseDetector:
+        ...
+
     @abstractmethod
     def fit(
         self, X: pd.DataFrame, feature_cols: list[str], vol_col: str
-    ) -> "BaseDetector":
+    ) -> BaseDetector:
         ...
 
     @abstractmethod
@@ -129,13 +305,17 @@ class VolThresholdDetector(BaseDetector):
 
     def fit(
         self, X: pd.DataFrame, feature_cols: list[str], vol_col: str
-    ) -> "VolThresholdDetector":
+    ) -> VolThresholdDetector:
+        if vol_col not in feature_cols:
+            raise ValueError(f"vol_col={vol_col!r} must be in feature_cols")
         if vol_col not in X.columns:
             raise KeyError(f"vol_col={vol_col!r} missing")
+        self.feature_cols_ = list(feature_cols)
+        self.vol_col_ = vol_col
+        self._record_fit_window(X)
         v = X[vol_col].to_numpy(dtype=float)
         qs = np.linspace(0.0, 1.0, self.n_states + 1)[1:-1]
         self.thresholds_ = np.quantile(v, qs)
-        self.vol_col_ = vol_col
         return self
 
     def predict(
@@ -150,6 +330,36 @@ class VolThresholdDetector(BaseDetector):
         P = np.zeros((len(v), self.n_states), dtype=float)
         P[np.arange(len(v)), states] = 1.0
         return P
+
+    def _params_dict(self) -> dict[str, Any]:
+        return {
+            "thresholds": np.asarray(
+                self.thresholds_, dtype=float
+            ).tolist()
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> VolThresholdDetector:
+        (
+            n_states,
+            feature_cols,
+            vol_col,
+            params,
+            fitted_on,
+        ) = cls._validate_payload(payload)
+        thresholds = _as_float_array(
+            params.get("thresholds"),
+            name="thresholds",
+            shape=(n_states - 1,),
+        )
+        if (np.diff(thresholds) < 0.0).any():
+            raise ValueError("thresholds must be sorted ascending")
+        model = cls(n_states=n_states)
+        model.feature_cols_ = feature_cols
+        model.vol_col_ = vol_col
+        model.fitted_on_ = fitted_on
+        model.thresholds_ = thresholds
+        return model
 
 
 # ---------------------------------------------------------------------------
@@ -174,17 +384,19 @@ class GMMDetector(BaseDetector):
 
     def fit(
         self, X: pd.DataFrame, feature_cols: list[str], vol_col: str
-    ) -> "GMMDetector":
+    ) -> GMMDetector:
         if vol_col not in feature_cols:
             raise ValueError(f"vol_col={vol_col!r} must be in feature_cols")
         self.feature_cols_ = list(feature_cols)
+        self.vol_col_ = vol_col
         self.vol_idx_ = self.feature_cols_.index(vol_col)
+        self._record_fit_window(X)
 
         M = self._matrix(X, self.feature_cols_)
         self.scaler_ = StandardScaler().fit(M)
         Z = self.scaler_.transform(M)
 
-        self.gmm_ = GaussianMixture(
+        gmm = GaussianMixture(
             n_components=self.n_states,
             covariance_type="full",
             n_init=self.n_init,
@@ -193,9 +405,15 @@ class GMMDetector(BaseDetector):
             max_iter=200,
         ).fit(Z)
 
+        # Keep plain arrays so a fitted model and a reloaded model behave
+        # identically without depending on sklearn internals at inference time.
+        self.weights_ = np.asarray(gmm.weights_, dtype=float).copy()
+        self.means_ = np.asarray(gmm.means_, dtype=float).copy()
+        self.covars_ = np.asarray(gmm.covariances_, dtype=float).copy()
+
         # Order components by mean volatility (scaled space is monotone in raw
         # volatility because the scaler's scale is positive).
-        scores = self.gmm_.means_[:, self.vol_idx_]
+        scores = self.means_[:, self.vol_idx_]
         self.order_ = np.argsort(scores, kind="stable")
         return self
 
@@ -207,8 +425,60 @@ class GMMDetector(BaseDetector):
     ) -> np.ndarray:
         M = self._matrix(X, self.feature_cols_)
         Z = self.scaler_.transform(M)
-        P = self.gmm_.predict_proba(Z)
+        log_prob = _gaussian_logpdf(Z, self.means_, self.covars_)
+        log_prob = log_prob + np.log(np.maximum(self.weights_, 1e-300))
+        log_norm = _logsumexp(log_prob, axis=1)
+        assert isinstance(log_norm, np.ndarray)
+        P = np.exp(log_prob - log_norm[:, None])
         return P[:, self.order_]
+
+    def _params_dict(self) -> dict[str, Any]:
+        return {
+            "weights": np.asarray(self.weights_, dtype=float).tolist(),
+            "means": np.asarray(self.means_, dtype=float).tolist(),
+            "covariances": np.asarray(self.covars_, dtype=float).tolist(),
+            "order": np.asarray(self.order_, dtype=int).tolist(),
+            **self._serialize_scaler(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> GMMDetector:
+        (
+            n_states,
+            feature_cols,
+            vol_col,
+            params,
+            fitted_on,
+        ) = cls._validate_payload(payload)
+        n_features = len(feature_cols)
+        weights = _as_prob_vector(
+            params.get("weights"), name="weights", size=n_states
+        )
+        means = _as_float_array(
+            params.get("means"),
+            name="means",
+            shape=(n_states, n_features),
+        )
+        covars = _as_float_array(
+            params.get("covariances"),
+            name="covariances",
+            shape=(n_states, n_features, n_features),
+        )
+        _check_symmetric_covars(covars, name="covariances")
+        order = _as_permutation(
+            params.get("order"), name="order", size=n_states
+        )
+        model = cls(n_states=n_states)
+        model.feature_cols_ = feature_cols
+        model.vol_col_ = vol_col
+        model.vol_idx_ = feature_cols.index(vol_col)
+        model.fitted_on_ = fitted_on
+        model.weights_ = weights
+        model.means_ = means
+        model.covars_ = covars
+        model.order_ = order
+        model._restore_scaler(params, n_features)
+        return model
 
 
 # ---------------------------------------------------------------------------
@@ -249,11 +519,13 @@ class GaussianHMMDetector(BaseDetector):
     # -- public API ---------------------------------------------------------
     def fit(
         self, X: pd.DataFrame, feature_cols: list[str], vol_col: str
-    ) -> "GaussianHMMDetector":
+    ) -> GaussianHMMDetector:
         if vol_col not in feature_cols:
             raise ValueError(f"vol_col={vol_col!r} must be in feature_cols")
         self.feature_cols_ = list(feature_cols)
+        self.vol_col_ = vol_col
         self.vol_idx_ = self.feature_cols_.index(vol_col)
+        self._record_fit_window(X)
 
         M = self._matrix(X, self.feature_cols_)
         if len(M) < max(2 * self.n_states, 20):
@@ -290,11 +562,73 @@ class GaussianHMMDetector(BaseDetector):
         Z = self.scaler_.transform(M)
         return self._filter(Z, init_probs)
 
+    def _params_dict(self) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "startprob": np.asarray(
+                self.startprob_, dtype=float
+            ).tolist(),
+            "transmat": np.asarray(
+                self.transmat_, dtype=float
+            ).tolist(),
+            "means": np.asarray(self.means_, dtype=float).tolist(),
+            "covars": np.asarray(self.covars_, dtype=float).tolist(),
+            **self._serialize_scaler(),
+        }
+        log_likelihood = getattr(self, "log_likelihood_", None)
+        if log_likelihood is not None and np.isfinite(log_likelihood):
+            params["log_likelihood"] = float(log_likelihood)
+        return params
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> GaussianHMMDetector:
+        (
+            n_states,
+            feature_cols,
+            vol_col,
+            params,
+            fitted_on,
+        ) = cls._validate_payload(payload)
+        n_features = len(feature_cols)
+        startprob = _as_prob_vector(
+            params.get("startprob"), name="startprob", size=n_states
+        )
+        transmat = _as_prob_matrix(
+            params.get("transmat"), name="transmat", size=n_states
+        )
+        means = _as_float_array(
+            params.get("means"),
+            name="means",
+            shape=(n_states, n_features),
+        )
+        covars = _as_float_array(
+            params.get("covars"),
+            name="covars",
+            shape=(n_states, n_features, n_features),
+        )
+        _check_symmetric_covars(covars, name="covars")
+
+        model = cls(n_states=n_states)
+        model.feature_cols_ = feature_cols
+        model.vol_col_ = vol_col
+        model.vol_idx_ = feature_cols.index(vol_col)
+        model.fitted_on_ = fitted_on
+        model.startprob_ = startprob
+        model.transmat_ = transmat
+        model.means_ = means
+        model.covars_ = covars
+        log_likelihood = params.get("log_likelihood")
+        if log_likelihood is not None:
+            model.log_likelihood_ = float(
+                _as_float_array(log_likelihood, name="log_likelihood")
+            )
+        model._restore_scaler(params, n_features)
+        return model
+
     # -- EM -----------------------------------------------------------------
     def _fit_once(
         self, Z: np.ndarray, seed: int
     ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], float]:
-        n, d = Z.shape
+        _, d = Z.shape
         k = self.n_states
 
         km = KMeans(n_clusters=k, n_init=1, random_state=seed).fit(Z)
@@ -443,7 +777,7 @@ def make_detector(
     gmm_n_init: int = 3,
     hmm_n_init: int = 3,
     hmm_max_iter: int = 50,
-):
+) -> BaseDetector:
     """Construct a detector by CLI name."""
     name = name.strip().lower()
     if name in {"vol_threshold", "threshold", "rule"}:
