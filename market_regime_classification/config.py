@@ -19,7 +19,7 @@ FEATURE_ORDER: tuple[str, ...] = (
     "corr_21",
 )
 
-DEFAULT_DETECTORS: tuple[str, ...] = ("vol_threshold", "gmm", "hmm")
+DEFAULT_DETECTORS: tuple[str, ...] = ("vol_threshold", "gmm", "hmm", "jump")
 
 
 @dataclass(frozen=True)
@@ -41,8 +41,18 @@ class Config:
         Seed for KMeans / GaussianMixture initialization.
     hmm_n_init, hmm_max_iter:
         Restarts and EM iteration cap for the hand-rolled HMM.
+    hmm_stickiness:
+        Dirichlet self-transition prior weight (kappa >= 0) encouraging regime
+        persistence in the HMM M-step.
+    hmm_cov_shrinkage:
+        Convex shrinkage weight in [0, 1] toward the diagonal covariance matrix
+        in the HMM M-step.
     gmm_n_init:
         Restarts for sklearn's GaussianMixture.
+    jump_penalty:
+        L1 state-switch penalty (lambda >= 0) for the Statistical Jump Model.
+    jump_n_init, jump_max_iter:
+        Restarts and coordinate-descent iteration cap for the Jump Model.
     """
 
     n_states: int = 3
@@ -52,7 +62,12 @@ class Config:
     random_state: int = 42
     hmm_n_init: int = 3
     hmm_max_iter: int = 50
+    hmm_stickiness: float = 15.0
+    hmm_cov_shrinkage: float = 0.25
     gmm_n_init: int = 3
+    jump_penalty: float = 10.0
+    jump_n_init: int = 3
+    jump_max_iter: int = 30
 
     def feature_columns(self, available: list[str] | tuple[str, ...]) -> list[str]:
         """Return FEATURE_ORDER columns present in `available`, plus vol_col."""

@@ -21,6 +21,7 @@ from .detectors import (
     BaseDetector,
     GaussianHMMDetector,
     GMMDetector,
+    JumpModelDetector,
     VolThresholdDetector,
 )
 
@@ -30,6 +31,7 @@ _MODEL_CLASSES: dict[str, type[BaseDetector]] = {
     VolThresholdDetector.name: VolThresholdDetector,
     GMMDetector.name: GMMDetector,
     GaussianHMMDetector.name: GaussianHMMDetector,
+    JumpModelDetector.name: JumpModelDetector,
 }
 
 

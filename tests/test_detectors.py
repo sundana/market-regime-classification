@@ -7,6 +7,7 @@ from market_regime_classification.data import synthetic_market
 from market_regime_classification.detectors import (
     GaussianHMMDetector,
     GMMDetector,
+    JumpModelDetector,
     VolThresholdDetector,
     make_detector,
 )
@@ -129,9 +130,51 @@ def test_hmm_recovers_latent_regimes_roughly():
     assert ari > 0.15, f"HMM failed to recover regimes (ARI={ari:.3f})"
 
 
+def test_jump_model(data):
+    features, _ = data
+    train, test = features.iloc[:800], features.iloc[800:1100]
+    det = JumpModelDetector(
+        n_states=3, jump_penalty=10.0, random_state=0, n_init=2, max_iter=25
+    ).fit(train, FEATURE_COLS, VOL_COL)
+    P = det.predict(test, FEATURE_COLS)
+    _check_probs(P, len(test), 3)
+
+    assert np.all(np.diff(det.means_[:, det.vol_idx_]) > 0)
+    assert np.allclose(det.startprob_.sum(), 1.0)
+    assert np.allclose(det.transmat_.sum(axis=1), 1.0)
+
+
+def test_jump_model_prediction_is_causal(data):
+    """Filtered probabilities must not depend on future rows."""
+    features, _ = data
+    train, test = features.iloc[:800], features.iloc[800:1000]
+    det = JumpModelDetector(
+        n_states=3, jump_penalty=10.0, random_state=3, n_init=1, max_iter=20
+    ).fit(train, FEATURE_COLS, VOL_COL)
+
+    full = det.predict(test, FEATURE_COLS)
+    prefix = det.predict(test.iloc[:40], FEATURE_COLS)
+    np.testing.assert_allclose(full[:40], prefix, atol=1e-12)
+
+
+def test_jump_model_block_filtering_matches_concatenation(data):
+    """Carrying init_probs across blocks must match one continuous filter."""
+    features, _ = data
+    train, test = features.iloc[:800], features.iloc[800:1000]
+    det = JumpModelDetector(
+        n_states=3, jump_penalty=10.0, random_state=4, n_init=1, max_iter=20
+    ).fit(train, FEATURE_COLS, VOL_COL)
+
+    P_all = det.predict(test, FEATURE_COLS)
+    P_a = det.predict(test.iloc[:50], FEATURE_COLS)
+    P_b = det.predict(test.iloc[50:], FEATURE_COLS, init_probs=P_a[-1])
+    np.testing.assert_allclose(P_b, P_all[50:], atol=1e-12)
+
+
 def test_factory():
     assert isinstance(make_detector("vol_threshold"), VolThresholdDetector)
     assert isinstance(make_detector("gmm"), GMMDetector)
     assert isinstance(make_detector("hmm"), GaussianHMMDetector)
+    assert isinstance(make_detector("jump"), JumpModelDetector)
     with pytest.raises(ValueError):
         make_detector("nope")

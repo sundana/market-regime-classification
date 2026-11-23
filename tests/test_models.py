@@ -14,6 +14,7 @@ from market_regime_classification.detectors import (
     BaseDetector,
     GaussianHMMDetector,
     GMMDetector,
+    JumpModelDetector,
     VolThresholdDetector,
 )
 from market_regime_classification.features import build_features
@@ -40,6 +41,9 @@ FACTORIES: dict[str, Callable[[], BaseDetector]] = {
     "gmm": lambda: GMMDetector(3, random_state=0, n_init=1),
     "hmm": lambda: GaussianHMMDetector(
         3, random_state=0, n_init=1, max_iter=25
+    ),
+    "jump": lambda: JumpModelDetector(
+        3, jump_penalty=10.0, random_state=0, n_init=1, max_iter=20
     ),
 }
 

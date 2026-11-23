@@ -64,7 +64,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--detectors",
         default=",".join(DEFAULT_DETECTORS),
-        help="comma-separated: vol_threshold,gmm,hmm",
+        help="comma-separated: vol_threshold,gmm,hmm,jump",
     )
     p.add_argument("--outdir", default="outputs", help="output directory")
     p.add_argument(
@@ -190,6 +190,11 @@ def main(argv: list[str] | None = None) -> int:
             gmm_n_init=cfg.gmm_n_init,
             hmm_n_init=cfg.hmm_n_init,
             hmm_max_iter=cfg.hmm_max_iter,
+            hmm_stickiness=cfg.hmm_stickiness,
+            hmm_cov_shrinkage=cfg.hmm_cov_shrinkage,
+            jump_penalty=cfg.jump_penalty,
+            jump_n_init=cfg.jump_n_init,
+            jump_max_iter=cfg.jump_max_iter,
         )
         results[name] = run_walkforward(
             features,

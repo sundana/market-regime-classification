@@ -22,7 +22,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
@@ -491,6 +490,13 @@ class GaussianHMMDetector(BaseDetector):
     -----
     * EM uses the forward-backward algorithm *on the training window* — that is
       legitimate: the whole training window is in the past.
+    * States are initialized using quantiles of the primary volatility feature
+      (with randomized quantile jitter on restarts > 0), preventing multi-feature
+      KMeans from collapsing rare crisis windows into low-volatility clusters.
+    * The M-step applies a Dirichlet sticky self-transition prior (``stickiness``,
+      Fox et al.) to prevent spurious regime chatter and shrinks state sample
+      covariances toward their diagonal (``cov_shrinkage``) to improve
+      conditioning in low-occupancy states.
     * Prediction uses a forward-only recursion. When called block-by-block with
       ``init_probs`` equal to the previous block's last filtered state, the
       filter is continuous across refits.
@@ -508,13 +514,25 @@ class GaussianHMMDetector(BaseDetector):
         max_iter: int = 50,
         tol: float = 1e-4,
         reg_covar: float = 1e-2,
+        stickiness: float = 15.0,
+        cov_shrinkage: float = 0.25,
     ) -> None:
         super().__init__(n_states)
+        if stickiness < 0.0 or not np.isfinite(stickiness):
+            raise ValueError("stickiness must be a finite non-negative number")
+        if (
+            cov_shrinkage < 0.0
+            or cov_shrinkage > 1.0
+            or not np.isfinite(cov_shrinkage)
+        ):
+            raise ValueError("cov_shrinkage must be in [0, 1]")
         self.random_state = int(random_state)
         self.n_init = int(n_init)
         self.max_iter = int(max_iter)
         self.tol = float(tol)
         self.reg_covar = float(reg_covar)
+        self.stickiness = float(stickiness)
+        self.cov_shrinkage = float(cov_shrinkage)
 
     # -- public API ---------------------------------------------------------
     def fit(
@@ -535,13 +553,13 @@ class GaussianHMMDetector(BaseDetector):
 
         best: tuple[float, tuple] | None = None
         for r in range(self.n_init):
-            params, ll = self._fit_once(Z, seed=self.random_state + r)
-            if best is None or (np.isfinite(ll) and ll > best[0]):
-                best = (ll, params)
+            params, obj, ll = self._fit_once(Z, restart=r)
+            if best is None or (np.isfinite(obj) and obj > best[0]):
+                best = (obj, (*params, ll))
         if best is None:
             raise RuntimeError("HMM fitting failed for every restart")
 
-        _, (pi, A, means, covars) = best
+        _, (pi, A, means, covars, best_ll) = best
 
         # Canonical state ordering: low vol -> high vol.
         order = np.argsort(means[:, self.vol_idx_], kind="stable")
@@ -549,7 +567,7 @@ class GaussianHMMDetector(BaseDetector):
         self.transmat_ = A[np.ix_(order, order)]
         self.means_ = means[order]
         self.covars_ = covars[order]
-        self.log_likelihood_ = float(best[0])
+        self.log_likelihood_ = float(best_ll)
         return self
 
     def predict(
@@ -625,19 +643,32 @@ class GaussianHMMDetector(BaseDetector):
         return model
 
     # -- EM -----------------------------------------------------------------
+    def _init_labels(self, Z: np.ndarray, restart: int) -> np.ndarray:
+        k = self.n_states
+        v = Z[:, self.vol_idx_]
+        qs = np.linspace(0.0, 1.0, k + 1)[1:-1]
+        if restart > 0:
+            rng = np.random.default_rng(self.random_state + restart)
+            jitter = rng.uniform(-0.12, 0.12, size=len(qs))
+            qs = np.sort(np.clip(qs + jitter, 0.05, 0.95))
+        thresholds = np.quantile(v, qs)
+        return np.clip(np.searchsorted(thresholds, v, side="right"), 0, k - 1)
+
     def _fit_once(
-        self, Z: np.ndarray, seed: int
-    ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], float]:
+        self, Z: np.ndarray, restart: int
+    ) -> tuple[
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], float, float
+    ]:
         _, d = Z.shape
         k = self.n_states
 
-        km = KMeans(n_clusters=k, n_init=1, random_state=seed).fit(Z)
-        labels = km.labels_
+        labels = self._init_labels(Z, restart)
 
-        # Initial transition matrix from hard labels, with smoothing.
+        # Initial transition matrix from hard labels, with sticky Dirichlet prior.
+        eye_k = np.eye(k)
         counts = np.zeros((k, k), dtype=float)
         np.add.at(counts, (labels[:-1], labels[1:]), 1.0)
-        trans = counts + 0.1
+        trans = counts + 0.1 + self.stickiness * eye_k
         trans /= trans.sum(axis=1, keepdims=True)
 
         # Initial state distribution favors the first observation's cluster.
@@ -656,13 +687,25 @@ class GaussianHMMDetector(BaseDetector):
             else:
                 means[j] = Z.mean(axis=0)
                 cov = np.cov(Z, rowvar=False, bias=True)
-            covars[j] = np.atleast_2d(cov) + self.reg_covar * eye
+            cov = np.atleast_2d(cov)
+            if self.cov_shrinkage > 0.0:
+                cov = (
+                    (1.0 - self.cov_shrinkage) * cov
+                    + self.cov_shrinkage * np.diag(np.diag(cov))
+                )
+            covars[j] = cov + self.reg_covar * eye
 
-        prev_ll = -np.inf
+        prev_obj = -np.inf
+        obj = -np.inf
         ll = -np.inf
         for _ in range(self.max_iter):
             logB = _gaussian_logpdf(Z, means, covars)
             log_alpha, log_beta, ll = self._forward_backward(logB, trans, start)
+
+            prior_ll = self.stickiness * float(
+                np.sum(np.log(np.maximum(np.diag(trans), 1e-300)))
+            )
+            obj = ll + prior_ll
 
             log_gamma = log_alpha + log_beta - ll
             gamma = np.exp(log_gamma)
@@ -679,8 +722,9 @@ class GaussianHMMDetector(BaseDetector):
             xi /= np.maximum(xi.sum(axis=(1, 2), keepdims=True), 1e-300)
 
             start = gamma[0] / max(gamma[0].sum(), 1e-300)
-            denom = np.maximum(gamma[:-1].sum(axis=0), 1e-300)
-            trans = xi.sum(axis=0) / denom[:, None]
+            xi_sum = xi.sum(axis=0) + self.stickiness * eye_k
+            denom = np.maximum(xi_sum.sum(axis=1, keepdims=True), 1e-300)
+            trans = xi_sum / denom
 
             nk = gamma.sum(axis=0)
             means = (gamma.T @ Z) / np.maximum(nk[:, None], 1e-300)
@@ -688,13 +732,18 @@ class GaussianHMMDetector(BaseDetector):
                 diff = Z - means[j]
                 cov = (gamma[:, j, None] * diff).T @ diff / max(nk[j], 1e-300)
                 cov = 0.5 * (cov + cov.T)
+                if self.cov_shrinkage > 0.0:
+                    cov = (
+                        (1.0 - self.cov_shrinkage) * cov
+                        + self.cov_shrinkage * np.diag(np.diag(cov))
+                    )
                 covars[j] = cov + self.reg_covar * eye
 
-            if np.isfinite(ll) and abs(ll - prev_ll) < self.tol:
+            if np.isfinite(obj) and abs(obj - prev_obj) < self.tol:
                 break
-            prev_ll = ll
+            prev_obj = obj
 
-        return (start, trans, means, covars), float(ll)
+        return (start, trans, means, covars), float(obj), float(ll)
 
     def _forward_backward(
         self,
@@ -702,25 +751,55 @@ class GaussianHMMDetector(BaseDetector):
         trans: np.ndarray,
         start: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, float]:
-        """Forward-backward on a training window (used only inside EM)."""
+        """Rabiner-scaled forward-backward on a training window (used only inside EM)."""
         n, k = logB.shape
-        logA = np.log(np.maximum(trans, 1e-300))
-        logpi = np.log(np.maximum(start, 1e-300))
+        pi = np.maximum(start, 1e-300)
+        pi = pi / pi.sum()
+        A = np.maximum(trans, 1e-300)
+        A = A / A.sum(axis=1, keepdims=True)
 
-        log_alpha = np.empty((n, k), dtype=float)
-        log_alpha[0] = logpi + logB[0]
+        row_max = np.max(logB, axis=1)
+        B = np.exp(logB - row_max[:, None])
+
+        alpha = np.empty((n, k), dtype=float)
+        scales = np.empty(n, dtype=float)
+
+        a0 = pi * B[0]
+        s0 = float(a0.sum())
+        if s0 <= 0.0:
+            a0 = np.full(k, 1.0 / k)
+            s0 = 1.0
+        else:
+            a0 /= s0
+        alpha[0] = a0
+        scales[0] = s0
+
         for t in range(1, n):
-            log_alpha[t] = logB[t] + _logsumexp(
-                log_alpha[t - 1][:, None] + logA, axis=0
-            )
+            at = (alpha[t - 1] @ A) * B[t]
+            st = float(at.sum())
+            if st <= 0.0:
+                at = np.full(k, 1.0 / k)
+                st = 1e-300
+            else:
+                at /= st
+            alpha[t] = at
+            scales[t] = st
 
-        log_beta = np.zeros((n, k), dtype=float)
+        log_scales = np.log(np.maximum(scales, 1e-300)) + row_max
+        ll = float(np.sum(log_scales))
+
+        beta = np.empty((n, k), dtype=float)
+        beta[-1] = 1.0
         for t in range(n - 2, -1, -1):
-            log_beta[t] = _logsumexp(
-                logA + (logB[t + 1] + log_beta[t + 1])[None, :], axis=1
-            )
+            bt = A @ (B[t + 1] * beta[t + 1])
+            beta[t] = bt / max(scales[t + 1], 1e-300)
 
-        ll = float(_logsumexp(log_alpha[-1], axis=0))
+        cum_log_scales = np.cumsum(log_scales)
+        log_alpha = np.log(np.maximum(alpha, 1e-300)) + cum_log_scales[:, None]
+        rev_cum_log_scales = np.cumsum(log_scales[::-1])[::-1] - log_scales
+        log_beta = (
+            np.log(np.maximum(beta, 1e-300)) + rev_cum_log_scales[:, None]
+        )
         return log_alpha, log_beta, ll
 
     def _filter(
@@ -738,6 +817,10 @@ class GaussianHMMDetector(BaseDetector):
 
         if init_probs is None:
             prior = self.startprob_.copy()
+            s = prior.sum()
+            prior = prior / s if s > 0 else np.full(k, 1.0 / k)
+            first = np.log(np.maximum(prior, 1e-300)) + logB[0]
+            alpha = np.exp(first - np.max(first))
         else:
             prior = np.asarray(init_probs, dtype=float).reshape(-1)
             if prior.shape != (k,):
@@ -745,13 +828,18 @@ class GaussianHMMDetector(BaseDetector):
                     f"init_probs must have shape ({k},), got {prior.shape}"
                 )
             prior = np.clip(prior, 0.0, None)
+            s = prior.sum()
+            prior = prior / s if s > 0 else np.full(k, 1.0 / k)
+            alpha = (prior @ self.transmat_) * np.exp(
+                logB[0] - np.max(logB[0])
+            )
 
-        s = prior.sum()
-        prior = prior / s if s > 0 else np.full(k, 1.0 / k)
-
-        first = np.log(np.maximum(prior, 1e-300)) + logB[0]
-        alpha = np.exp(first - np.max(first))
-        alpha /= max(alpha.sum(), 1e-300)
+        s0 = alpha.sum()
+        alpha = (
+            alpha / s0
+            if (np.isfinite(s0) and s0 > 0)
+            else np.full(k, 1.0 / k)
+        )
 
         out = np.empty((len(Z), k), dtype=float)
         out[0] = alpha
@@ -767,6 +855,292 @@ class GaussianHMMDetector(BaseDetector):
 
 
 # ---------------------------------------------------------------------------
+# Statistical Jump Model (SJM)
+# ---------------------------------------------------------------------------
+class JumpModelDetector(BaseDetector):
+    """Statistical Jump Model with L1 jump penalty and causal forward filtering.
+
+    Fits regime centroids and diagonal variances on the standardized training
+    window by minimizing negative diagonal Gaussian log-likelihood plus an L1
+    state-switch penalty ``jump_penalty`` via coordinate descent (alternating
+    dynamic-programming path updates with parameter updates).
+
+    At prediction time, runs a causal forward-only filter using the fitted
+    diagonal-Gaussian emissions and sticky transition matrix, carrying state
+    across blocks via ``init_probs``.
+    """
+
+    name = "jump"
+
+    def __init__(
+        self,
+        n_states: int = 3,
+        jump_penalty: float = 10.0,
+        random_state: int = 42,
+        n_init: int = 3,
+        max_iter: int = 30,
+    ) -> None:
+        super().__init__(n_states)
+        if jump_penalty < 0.0 or not np.isfinite(jump_penalty):
+            raise ValueError(
+                "jump_penalty must be a finite non-negative number"
+            )
+        self.jump_penalty = float(jump_penalty)
+        self.random_state = int(random_state)
+        self.n_init = int(n_init)
+        self.max_iter = int(max_iter)
+
+    def fit(
+        self, X: pd.DataFrame, feature_cols: list[str], vol_col: str
+    ) -> JumpModelDetector:
+        if vol_col not in feature_cols:
+            raise ValueError(f"vol_col={vol_col!r} must be in feature_cols")
+        self.feature_cols_ = list(feature_cols)
+        self.vol_col_ = vol_col
+        self.vol_idx_ = self.feature_cols_.index(vol_col)
+        self._record_fit_window(X)
+
+        M = self._matrix(X, self.feature_cols_)
+        if len(M) < max(2 * self.n_states, 20):
+            raise ValueError(
+                f"not enough training rows for JumpModel: {len(M)}"
+            )
+        self.scaler_ = StandardScaler().fit(M)
+        Z = self.scaler_.transform(M)
+
+        best_cost = np.inf
+        best_params: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+        for r in range(self.n_init):
+            centers, vars_, states, cost = self._fit_once(Z, restart=r)
+            if np.isfinite(cost) and (
+                best_params is None or cost < best_cost
+            ):
+                best_cost = cost
+                best_params = (centers, vars_, states)
+
+        if best_params is None:
+            raise RuntimeError("JumpModel fitting failed for every restart")
+
+        centers, vars_, states = best_params
+        order = np.argsort(centers[:, self.vol_idx_], kind="stable")
+        self.means_ = centers[order]
+        self.vars_ = vars_[order]
+
+        inv_order = np.empty_like(order)
+        inv_order[order] = np.arange(self.n_states)
+        ordered_states = inv_order[states]
+
+        k = self.n_states
+        counts = np.zeros((k, k), dtype=float)
+        np.add.at(counts, (ordered_states[:-1], ordered_states[1:]), 1.0)
+        trans = counts + 0.1 + self.jump_penalty * np.eye(k)
+        trans /= trans.sum(axis=1, keepdims=True)
+        self.transmat_ = trans
+
+        start = np.bincount(ordered_states, minlength=k).astype(float) + 1.0
+        start /= start.sum()
+        self.startprob_ = start
+        self.cost_ = float(best_cost)
+        return self
+
+    def _init_labels(self, Z: np.ndarray, restart: int) -> np.ndarray:
+        k = self.n_states
+        v = Z[:, self.vol_idx_]
+        qs = np.linspace(0.0, 1.0, k + 1)[1:-1]
+        if restart > 0:
+            rng = np.random.default_rng(self.random_state + restart)
+            jitter = rng.uniform(-0.12, 0.12, size=len(qs))
+            qs = np.sort(np.clip(qs + jitter, 0.05, 0.95))
+        thresholds = np.quantile(v, qs)
+        return np.clip(np.searchsorted(thresholds, v, side="right"), 0, k - 1)
+
+    def _fit_once(
+        self, Z: np.ndarray, restart: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        n, d = Z.shape
+        k = self.n_states
+        states = self._init_labels(Z, restart)
+
+        centers = np.empty((k, d), dtype=float)
+        vars_ = np.ones((k, d), dtype=float)
+        global_var = np.maximum(np.var(Z, axis=0), 0.05)
+
+        lam = self.jump_penalty
+        off_diag = lam * (1.0 - np.eye(k))
+        prev_states = np.full(n, -1, dtype=int)
+
+        cost = np.inf
+        for _ in range(self.max_iter):
+            for j in range(k):
+                mask = states == j
+                if mask.sum() >= 5:
+                    pts = Z[mask]
+                    centers[j] = pts.mean(axis=0)
+                    vars_[j] = np.maximum(
+                        0.7 * np.var(pts, axis=0) + 0.3 * global_var, 0.05
+                    )
+                elif mask.any():
+                    centers[j] = Z[mask].mean(axis=0)
+                    vars_[j] = global_var
+                else:
+                    centers[j] = Z.mean(axis=0)
+                    vars_[j] = global_var
+
+            diff = Z[:, None, :] - centers[None, :, :]
+            logdet = 0.5 * np.sum(np.log(vars_), axis=1)
+            maha = 0.5 * np.sum((diff * diff) / vars_[None, :, :], axis=2)
+            loss = maha + logdet[None, :]
+
+            dp = np.empty((n, k), dtype=float)
+            back = np.empty((n, k), dtype=int)
+            dp[0] = loss[0]
+            back[0] = 0
+            for t in range(1, n):
+                scores = dp[t - 1][:, None] + off_diag
+                best_prev = np.argmin(scores, axis=0)
+                dp[t] = loss[t] + scores[best_prev, np.arange(k)]
+                back[t] = best_prev
+
+            states = np.empty(n, dtype=int)
+            states[-1] = int(np.argmin(dp[-1]))
+            cost = float(dp[-1, states[-1]])
+            for t in range(n - 2, -1, -1):
+                states[t] = back[t + 1, states[t + 1]]
+
+            if np.array_equal(states, prev_states):
+                break
+            prev_states = states.copy()
+
+        return centers, vars_, states, cost
+
+    def predict(
+        self,
+        X: pd.DataFrame,
+        feature_cols: list[str],
+        init_probs: np.ndarray | None = None,
+    ) -> np.ndarray:
+        M = self._matrix(X, self.feature_cols_)
+        Z = self.scaler_.transform(M)
+        n = len(Z)
+        k = self.n_states
+        if n == 0:
+            return np.empty((0, k), dtype=float)
+
+        diff = Z[:, None, :] - self.means_[None, :, :]
+        logdet = np.sum(np.log(2.0 * np.pi * self.vars_), axis=1)
+        maha = np.sum((diff * diff) / self.vars_[None, :, :], axis=2)
+        logB = -0.5 * (logdet[None, :] + maha)
+
+        if init_probs is None:
+            prior = self.startprob_.copy()
+            s = prior.sum()
+            prior = prior / s if s > 0 else np.full(k, 1.0 / k)
+            first = np.log(np.maximum(prior, 1e-300)) + logB[0]
+            alpha = np.exp(first - np.max(first))
+        else:
+            prior = np.asarray(init_probs, dtype=float).reshape(-1)
+            if prior.shape != (k,):
+                raise ValueError(
+                    f"init_probs must have shape ({k},), got {prior.shape}"
+                )
+            prior = np.clip(prior, 0.0, None)
+            s = prior.sum()
+            prior = prior / s if s > 0 else np.full(k, 1.0 / k)
+            alpha = (prior @ self.transmat_) * np.exp(
+                logB[0] - np.max(logB[0])
+            )
+
+        s0 = alpha.sum()
+        alpha = (
+            alpha / s0
+            if (np.isfinite(s0) and s0 > 0)
+            else np.full(k, 1.0 / k)
+        )
+
+        out = np.empty((n, k), dtype=float)
+        out[0] = alpha
+        for t in range(1, n):
+            alpha = (alpha @ self.transmat_) * np.exp(
+                logB[t] - np.max(logB[t])
+            )
+            s = alpha.sum()
+            if not np.isfinite(s) or s <= 0:
+                alpha = np.full(k, 1.0 / k)
+            else:
+                alpha /= s
+            out[t] = alpha
+        return out
+
+    def _params_dict(self) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "jump_penalty": float(self.jump_penalty),
+            "startprob": np.asarray(
+                self.startprob_, dtype=float
+            ).tolist(),
+            "transmat": np.asarray(
+                self.transmat_, dtype=float
+            ).tolist(),
+            "means": np.asarray(self.means_, dtype=float).tolist(),
+            "vars": np.asarray(self.vars_, dtype=float).tolist(),
+            **self._serialize_scaler(),
+        }
+        cost = getattr(self, "cost_", None)
+        if cost is not None and np.isfinite(cost):
+            params["cost"] = float(cost)
+        return params
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> JumpModelDetector:
+        (
+            n_states,
+            feature_cols,
+            vol_col,
+            params,
+            fitted_on,
+        ) = cls._validate_payload(payload)
+        n_features = len(feature_cols)
+        jump_penalty = float(
+            _as_float_array(params.get("jump_penalty"), name="jump_penalty")
+        )
+        if jump_penalty < 0.0:
+            raise ValueError("jump_penalty must be non-negative")
+        startprob = _as_prob_vector(
+            params.get("startprob"), name="startprob", size=n_states
+        )
+        transmat = _as_prob_matrix(
+            params.get("transmat"), name="transmat", size=n_states
+        )
+        means = _as_float_array(
+            params.get("means"),
+            name="means",
+            shape=(n_states, n_features),
+        )
+        vars_ = _as_float_array(
+            params.get("vars"),
+            name="vars",
+            shape=(n_states, n_features),
+        )
+        if (vars_ <= 0.0).any():
+            raise ValueError("vars must be strictly positive")
+
+        model = cls(n_states=n_states, jump_penalty=jump_penalty)
+        model.feature_cols_ = feature_cols
+        model.vol_col_ = vol_col
+        model.vol_idx_ = feature_cols.index(vol_col)
+        model.fitted_on_ = fitted_on
+        model.startprob_ = startprob
+        model.transmat_ = transmat
+        model.means_ = means
+        model.vars_ = vars_
+        cost = params.get("cost")
+        if cost is not None:
+            model.cost_ = float(_as_float_array(cost, name="cost"))
+        model._restore_scaler(params, n_features)
+        return model
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 def make_detector(
@@ -777,6 +1151,11 @@ def make_detector(
     gmm_n_init: int = 3,
     hmm_n_init: int = 3,
     hmm_max_iter: int = 50,
+    hmm_stickiness: float = 15.0,
+    hmm_cov_shrinkage: float = 0.25,
+    jump_penalty: float = 10.0,
+    jump_n_init: int = 3,
+    jump_max_iter: int = 30,
 ) -> BaseDetector:
     """Construct a detector by CLI name."""
     name = name.strip().lower()
@@ -792,7 +1171,17 @@ def make_detector(
             random_state=random_state,
             n_init=hmm_n_init,
             max_iter=hmm_max_iter,
+            stickiness=hmm_stickiness,
+            cov_shrinkage=hmm_cov_shrinkage,
+        )
+    if name in {"jump", "sjm", "jump_model"}:
+        return JumpModelDetector(
+            n_states=n_states,
+            jump_penalty=jump_penalty,
+            random_state=random_state,
+            n_init=jump_n_init,
+            max_iter=jump_max_iter,
         )
     raise ValueError(
-        f"unknown detector {name!r}; choose from vol_threshold, gmm, hmm"
+        f"unknown detector {name!r}; choose from vol_threshold, gmm, hmm, jump"
     )

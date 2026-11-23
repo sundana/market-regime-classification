@@ -68,7 +68,8 @@ truncated here to the headline columns; the CLI also emits `calmar`,
 |---|---|---|
 | `vol_threshold` | Rule baseline | Trailing-window quantiles of 21-day realized vol. Hard labels, one-hot "probabilities". |
 | `gmm` | Unsupervised ML | Gaussian mixture on standardized features; per-sample posterior, no temporal persistence. |
-| `hmm` | Unsupervised ML | Full-covariance Gaussian HMM with EM (Baum-Welch), **forward-filtered only** at prediction time. |
+| `hmm` | Unsupervised ML | Full-covariance Gaussian HMM with sticky transition prior, diagonal covariance shrinkage, and quantile-anchored initialization; **forward-filtered only** at prediction time. |
+| `jump` | Unsupervised ML | Statistical Jump Model (SJM) with $\ell_1$ state-switch penalty and diagonal-Gaussian emissions; **forward-filtered only** at prediction time. |
 
 All three run through the same walk-forward harness and the same economic
 scorecard. If the ML models cannot beat a simple vol-quantile rule
@@ -181,7 +182,7 @@ uv export --format requirements-txt --no-hashes > requirements.txt
 | `--train-days` | `756` | Trailing training window (~3 years). |
 | `--refit-every` | `63` | Out-of-sample days between refits (~quarterly). |
 | `--n-states` | `3` | Number of regimes; states sorted lowest → highest volatility. |
-| `--detectors` | `vol_threshold,gmm,hmm` | Comma-separated detector subset. |
+| `--detectors` | `vol_threshold,gmm,hmm,jump` | Comma-separated detector subset. |
 | `--outdir` | `outputs` | Output directory (created if missing). |
 | `--cost-bps` | `0` | One-way transaction cost in basis points charged on the absolute weight change at each rebalance. |
 | `--save-models` | off | Write the final fitted model per detector to `models/`. |
