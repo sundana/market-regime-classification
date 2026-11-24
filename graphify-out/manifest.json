@@ -1,170 +1,200 @@
 {
   ".github/workflows/publish.yml": {
-    "mtime": 1795426570.388677,
-    "seen": 1795426757.9332204,
+    "mtime": 1795486574.769274,
+    "seen": 1795491016.9686022,
     "ast_hash": "825c57ad7fa705e3e4b9ddaffd3a3e18",
     "semantic_hash": ""
   },
   "market_regime_classification/__init__.py": {
-    "mtime": 1795436070.379241,
-    "seen": 1795436105.9482381,
-    "ast_hash": "cbac302effc0f9d1d31c76764b62e49e",
+    "mtime": 1795490620.553,
+    "seen": 1795491016.968603,
+    "ast_hash": "8f344ec50e9e89220f96d28959c63ad8",
     "semantic_hash": ""
   },
   "market_regime_classification/config.py": {
-    "mtime": 1795434846.2169352,
-    "seen": 1795435101.269231,
+    "mtime": 1795486574.7732382,
+    "seen": 1795491016.968606,
     "ast_hash": "ad6524cc074272da34fbf5a4e0890b5b",
     "semantic_hash": ""
   },
   "market_regime_classification/data.py": {
-    "mtime": 1795426780.0006523,
-    "seen": 1795426844.6923177,
+    "mtime": 1795486574.773754,
+    "seen": 1795491016.968607,
     "ast_hash": "0b0838155aa3139247ca0d8f0306a9c2",
     "semantic_hash": ""
   },
   "market_regime_classification/detectors.py": {
-    "mtime": 1795435025.6560318,
-    "seen": 1795435101.269234,
+    "mtime": 1795486574.7743402,
+    "seen": 1795491016.968608,
     "ast_hash": "5d81e4364fc5b00d70c797b442aeb8e2",
     "semantic_hash": ""
   },
   "market_regime_classification/evaluate.py": {
-    "mtime": 1795427877.294677,
-    "seen": 1795428221.9586766,
+    "mtime": 1795486574.774711,
+    "seen": 1795491016.968609,
     "ast_hash": "bb04b9d8612c6005876386777208b2e1",
     "semantic_hash": ""
   },
   "market_regime_classification/features.py": {
-    "mtime": 1795426647.9636283,
-    "seen": 1795426757.9332252,
+    "mtime": 1795486574.7749965,
+    "seen": 1795491016.968609,
     "ast_hash": "eb737f4e63875c07c65ab372a43166fe",
     "semantic_hash": ""
   },
   "market_regime_classification/plotting.py": {
-    "mtime": 1795427882.949588,
-    "seen": 1795428221.95868,
+    "mtime": 1795486574.7753623,
+    "seen": 1795491016.9686122,
     "ast_hash": "4cf08031db2eb9bf2812ef4204afdda3",
     "semantic_hash": ""
   },
   "market_regime_classification/run.py": {
-    "mtime": 1795434937.7167313,
-    "seen": 1795435101.2692409,
+    "mtime": 1795486574.7756264,
+    "seen": 1795491016.9686148,
     "ast_hash": "d492ea1ecd7523369e80b505c57ea057",
     "semantic_hash": ""
   },
   "market_regime_classification/walkforward.py": {
-    "mtime": 1795427864.6498952,
-    "seen": 1795428221.9586809,
+    "mtime": 1795486574.776029,
+    "seen": 1795491016.968617,
     "ast_hash": "4ef5a696ad3d08cd745cd391dbea6a34",
     "semantic_hash": ""
   },
   "pyproject.toml": {
-    "mtime": 1795436070.3312392,
-    "seen": 1795436105.9482472,
-    "ast_hash": "769c3dae98f06b1334d559f6429386e9",
+    "mtime": 1795490620.468226,
+    "seen": 1795491016.968617,
+    "ast_hash": "58f5d6c00fa7d474eb3359260ff151c4",
     "semantic_hash": ""
   },
   "tests/test_detectors.py": {
-    "mtime": 1795434957.8844883,
-    "seen": 1795435101.2692475,
+    "mtime": 1795486574.776765,
+    "seen": 1795491016.968621,
     "ast_hash": "f037f16c4c9d19c7515e70e2fe8363aa",
     "semantic_hash": ""
   },
   "tests/test_features.py": {
-    "mtime": 1795426007.5686672,
-    "seen": 1795426757.9332318,
+    "mtime": 1795341804.218817,
+    "seen": 1795491016.968622,
     "ast_hash": "4af28e27362603e2d12b61ae4e5d49c8",
     "semantic_hash": "4af28e27362603e2d12b61ae4e5d49c8"
   },
   "tests/test_package.py": {
-    "mtime": 1795431061.3579416,
-    "seen": 1795431162.3040354,
-    "ast_hash": "9b722bbf6a0cf390273aa18c53e7fc49",
+    "mtime": 1795490678.2553709,
+    "seen": 1795491016.968624,
+    "ast_hash": "1a57066b35304a30498369df5926d9e1",
     "semantic_hash": ""
   },
   "tests/test_walkforward.py": {
-    "mtime": 1795427972.3399715,
-    "seen": 1795428221.9586868,
+    "mtime": 1795486574.7774732,
+    "seen": 1795491016.968627,
     "ast_hash": "c885b38689ecb391bdf501f0d46154d4",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1795434969.9144979,
-    "seen": 1795435101.2692559,
-    "ast_hash": "5565644fe8138ad6a0805d8f27ecb0b5",
+    "mtime": 1795490986.334619,
+    "seen": 1795491016.968628,
+    "ast_hash": "abd0fd3332d2e178c2610b524a1571a2",
     "semantic_hash": ""
   },
   ".claude/settings.json": {
-    "mtime": 1795426007.5616667,
-    "seen": 1795426757.9332144,
+    "mtime": 1795360221.6393676,
+    "seen": 1795491016.968596,
     "ast_hash": "5922906ee0ae08735718d5b368d30fc9",
     "semantic_hash": ""
   },
   "CLAUDE.md": {
-    "mtime": 1795426007.5629792,
-    "seen": 1795426757.933235,
+    "mtime": 1795360221.640157,
+    "seen": 1795491016.968628,
     "ast_hash": "dfe5fa7939121e96d61b54077cc9ab84",
     "semantic_hash": ""
   },
   "docs/regimes-example.png": {
-    "mtime": 1795426007.5636668,
-    "seen": 1795426757.9332361,
+    "mtime": 1795360221.641837,
+    "seen": 1795491016.968629,
     "ast_hash": "446aa52e997f0cb12282c6bdd67a265c",
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1795426570.2409725,
-    "seen": 1795426757.9332182,
+    "mtime": 1795486574.7689047,
+    "seen": 1795491016.9686,
     "ast_hash": "7140d13fe9625036b9c18dd3a8bcd32a",
     "semantic_hash": ""
   },
   "market_regime_classification/metadata.py": {
-    "mtime": 1795427972.2899697,
-    "seen": 1795428221.958678,
+    "mtime": 1795486574.7751024,
+    "seen": 1795491016.96861,
     "ast_hash": "3b017567b08aee848a6258f3a6b7221f",
     "semantic_hash": ""
   },
   "tests/test_cli.py": {
-    "mtime": 1795427946.7570033,
-    "seen": 1795428221.958682,
+    "mtime": 1795486574.7763498,
+    "seen": 1795491016.968619,
     "ast_hash": "80f7149d9038287097c651813dd0f4bf",
     "semantic_hash": ""
   },
   "tests/test_data.py": {
-    "mtime": 1795426783.9138012,
-    "seen": 1795426844.6923313,
+    "mtime": 1795486574.7764583,
+    "seen": 1795491016.96862,
     "ast_hash": "d1d37beb3ec0c22f7bd3746c42213123",
     "semantic_hash": ""
   },
   "tests/test_metadata.py": {
-    "mtime": 1795427951.6001866,
-    "seen": 1795428221.958685,
+    "mtime": 1795486574.7768757,
+    "seen": 1795491016.9686232,
     "ast_hash": "be5be7d0b698ee0298667ef42cae2001",
     "semantic_hash": ""
   },
   "market_regime_classification/models.py": {
-    "mtime": 1795434937.5827265,
-    "seen": 1795435101.2692387,
+    "mtime": 1795486574.7752082,
+    "seen": 1795491016.968611,
     "ast_hash": "528a64945cab67a6f8b0231872b6aa84",
     "semantic_hash": ""
   },
   "tests/test_models.py": {
-    "mtime": 1795434957.92849,
-    "seen": 1795435101.2692506,
+    "mtime": 1795486574.7769945,
+    "seen": 1795491016.968624,
     "ast_hash": "55078d6dd44ff0b6f17b1c7df6bbade3",
     "semantic_hash": ""
   },
   "market_regime_classification/score.py": {
-    "mtime": 1795431057.112494,
-    "seen": 1795431162.3040216,
+    "mtime": 1795486574.7757494,
+    "seen": 1795491016.968616,
     "ast_hash": "9eafbf6fd13bb0d596cd1f7ff41f3cb7",
     "semantic_hash": ""
   },
   "tests/test_score.py": {
-    "mtime": 1795431074.4984393,
-    "seen": 1795431162.3040369,
+    "mtime": 1795486574.7773108,
+    "seen": 1795491016.968626,
     "ast_hash": "abc6f9b7c2e05bb284da91aa9fd5014c",
+    "semantic_hash": ""
+  },
+  "market_regime_classification/brief.py": {
+    "mtime": 1795491011.6659155,
+    "seen": 1795491016.968605,
+    "ast_hash": "32cd3f67f9da9903573a72ac4874ac4f",
+    "semantic_hash": ""
+  },
+  "market_regime_classification/regime_labels.py": {
+    "mtime": 1795490489.2534416,
+    "seen": 1795491016.9686131,
+    "ast_hash": "a3634430cc12f43a05d4502832db28cf",
+    "semantic_hash": ""
+  },
+  "market_regime_classification/regime_quality.py": {
+    "mtime": 1795491051.0385222,
+    "seen": 1795491068.761591,
+    "ast_hash": "bec00018944ba04fdc9a55ffa4668fe6",
+    "semantic_hash": ""
+  },
+  "tests/test_brief.py": {
+    "mtime": 1795490672.5469716,
+    "seen": 1795491016.968618,
+    "ast_hash": "c0bb745a90c96c1f1aeafb3354d0505f",
+    "semantic_hash": ""
+  },
+  "tests/test_regime_quality.py": {
+    "mtime": 1795490944.8196485,
+    "seen": 1795491016.9686248,
+    "ast_hash": "ecb7ad2ccf7d99775e051a941719c667",
     "semantic_hash": ""
   }
 }

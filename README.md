@@ -6,8 +6,9 @@
 [![CI](https://github.com/sundana/market-regime-classification/actions/workflows/ci.yml/badge.svg)](https://github.com/sundana/market-regime-classification/actions/workflows/ci.yml)
 
 A causal, walk-forward baseline for **detecting market regimes** with a
-volatility rule, a Gaussian mixture, and a Gaussian HMM — plus the evaluation
-discipline that separates a real signal from a look-ahead artifact.
+volatility rule, a Gaussian mixture, a Gaussian HMM, and a statistical jump
+model — plus the evaluation discipline that separates a real signal from a
+look-ahead artifact, and a trader-readable regime brief.
 
 This is not a trading system. It is a runnable reference for the three things
 regime research usually gets wrong:
@@ -67,7 +68,7 @@ truncated here to the headline columns; the CLI also emits `calmar`,
 | Name | Type | Notes |
 |---|---|---|
 | `vol_threshold` | Rule baseline | Trailing-window quantiles of 21-day realized vol. Hard labels, one-hot "probabilities". |
-| `gmm` | Unsupervised ML | Gaussian mixture on standardized features; per-sample posterior, no temporal persistence. |
+| `gmm` | Unsupervised ML | Gaussian mixture on standardized features; per-sample posterior, no temporal persistence. Not recommended as the primary trader-facing regime model. |
 | `hmm` | Unsupervised ML | Full-covariance Gaussian HMM with sticky transition prior, diagonal covariance shrinkage, and quantile-anchored initialization; **forward-filtered only** at prediction time. |
 | `jump` | Unsupervised ML | Statistical Jump Model (SJM) with $\ell_1$ state-switch penalty and diagonal-Gaussian emissions; **forward-filtered only** at prediction time. |
 
@@ -90,6 +91,8 @@ volatility after every refit, so `state_0` is always the calmest regime.
 - [Python API](#python-api)
 - [Saving and reusing fitted models](#saving-and-reusing-fitted-models)
 - [Scoring new data with the CLI](#scoring-new-data-with-the-cli)
+- [Regime brief for traders](#regime-brief-for-traders)
+- [Regime quality evaluation](#regime-quality-evaluation)
 - [Transaction costs and the scorecard](#transaction-costs-and-the-scorecard)
 - [Reading the results](#reading-the-results)
 - [Deliberate limitations](#deliberate-limitations)
@@ -141,18 +144,25 @@ uv run market-regime --source csv --csv data/prices.csv \
 # Score new data with a saved model
 uv run market-regime-score --model outputs/models/hmm.json \
     --csv data/prices.csv --outdir scores
+
+# Turn a walk-forward run into a trader-readable brief and a quality report
+uv run market-regime-brief --run-dir outputs
+uv run market-regime-quality --run-dir outputs
 ```
 
 Add `--cost-bps 5` to charge 5 bps per unit of weight change. `--save-models`
 exports the final fitted model per detector to `outputs/models/`.
 
-`uv run market-regime` and `uv run market-regime-score` invoke the console
-scripts declared in `pyproject.toml`:
+`uv run market-regime`, `market-regime-score`, `market-regime-brief`, and
+`market-regime-quality` invoke the console scripts declared in
+`pyproject.toml`:
 
 ```toml
 [project.scripts]
 market-regime = "market_regime_classification.run:main"
 market-regime-score = "market_regime_classification.score:main"
+market-regime-brief = "market_regime_classification.brief:main"
+market-regime-quality = "market_regime_classification.regime_quality:main"
 ```
 
 `python -m market_regime_classification.run ...` is equivalent. Run the tests
@@ -205,6 +215,10 @@ outputs/
 ├── regimes.png              # price shading, filtered probabilities, equity curves
 ├── true_states.csv          # synthetic source only
 ├── models/                  # --save-models only: final fitted model per detector
+├── regime_brief.md          # market-regime-brief: plain-language daily note
+├── regime_brief.json        # same field set, for dashboards and alerts
+├── regime_quality.md        # market-regime-quality: regime-quality report
+├── regime_quality.json
 └── run_metadata.json        # provenance: versions, git SHA, argv, config, output hashes
 ```
 
@@ -372,6 +386,88 @@ continues the HMM forward filter from the prior block; the GMM and volatility
 rule ignore it. The CLI never refits: rerun the walk-forward at your refit
 cadence and reload the new artifact.
 
+## Regime brief for traders
+
+The scorecard is for research. For a human-readable daily note, run:
+
+```bash
+uv run market-regime-brief --run-dir outputs
+```
+
+It reads the walk-forward outputs, prints the brief, and writes
+`regime_brief.md` and `regime_brief.json` next to them. By default it uses
+`jump`, `hmm`, and `vol_threshold` when present; GMM is excluded because it has
+no temporal persistence. Use `--detectors jump,hmm` to choose explicitly and
+`--primary jump` to set the tie-breaker.
+
+The brief names states in volatility order (CALM → NORMAL → STRESSED), shows
+the reference model's confidence and the current run length, flags model
+disagreement, and lists the evidence (realised volatility, drawdown, trend,
+stock/bond correlation) plus the historical forward volatility and return for
+that state. It always states the two things a junior trader needs to hear: this
+is a nowcast, not a forecast, and a volatility regime is not a direction call.
+
+```text
+# MARKET REGIME BRIEF — SPY,TLT — 2026-11-23
+
+## 🔴 STRESSED — high realised volatility; risk is elevated, not a direction call
+
+State 2 of 3 (calm → stressed).
+
+- Reference model: jump
+- Confidence: 100% (model score, not a calibrated probability)
+- Stability: FLAPPING — 1 session in this run, 2 switches in the last 20 sessions
+- Typical run in this state: 27 sessions
+
+## Model agreement
+
+Agreement: unanimous (3/3 agree).
+
+| Model | Call | P(call) | Current run | Switches/20d |
+|---|---|---|---|---|
+| jump | 🔴 STRESSED | 100% | 1d | 2 |
+| hmm | 🔴 STRESSED | 100% | 3d | 3 |
+| vol_threshold | 🔴 STRESSED | 100% | 13d | 2 |
+
+...
+```
+
+The JSON is schema-versioned and carries the same fields for a dashboard or an
+alerting job. `--stability-min-run`, `--flap-window`, and `--flap-switches`
+control when the stability badge drops from STABLE to BUILDING or FLAPPING.
+
+## Regime quality evaluation
+
+The question for this project is not "does it beat buy & hold?" but "is the
+regime call accurate, timely, stable, and calibrated?" Run:
+
+```bash
+uv run market-regime-quality --run-dir outputs
+
+# optional: compute calibration from raw returns
+uv run market-regime-quality --run-dir outputs --prices-csv data/prices.csv
+```
+
+It writes `regime_quality.json` and `regime_quality.md` and prints a report
+covering:
+
+- **Recovery** on synthetic runs with `true_states.csv`: exact and within-one
+  accuracy, adjusted Rand index, transition detection lag, and churn versus the
+  latent state.
+- **Separation**: forward 21-day volatility and return by state, plus the
+  high-volatility / calm ratio.
+- **Calibration**: AUC, Brier score, Spearman correlation, and a reliability
+  table against top-tercile forward volatility (when `--prices-csv` is given).
+- **Stability**: switches per year, run lengths, share of runs under five days,
+  and refit-boundary churn.
+- **Consensus**: all-agree share and pairwise agreement.
+- **Stress-event recall**: whether the highest-volatility state appears within
+  ±21 calendar days of a configurable event list.
+
+`uv run pytest -q` includes deterministic tests for these metrics (perfect
+recovery, lag detection, strict-majority consensus, calibration ranking,
+refit-day churn, and event recall), so the evaluation gate runs in CI.
+
 ## Transaction costs and the scorecard
 
 The economic scorecard charges a flat one-way cost on the absolute weight
@@ -417,6 +513,10 @@ regime-conditional forward volatility/return and the economic scorecard.
 
 This is a research baseline, not a production trading system:
 
+- The regime brief is a nowcast. Transitions are typically identified 6–12
+  trading sessions late on the synthetic benchmark, and a high-volatility state
+  is not a directional sell signal. Check calibration with
+  `market-regime-quality` before showing the brief to traders.
 - Single asset target; multi-asset regime work needs covariance/correlation
   state modeling.
 - Costs are a flat bps charge on the absolute weight change; there is no
@@ -463,7 +563,10 @@ market_regime_classification/
 ├── models.py        # schema-versioned JSON save/load for fitted detectors
 ├── plotting.py      # diagnostic figure
 ├── run.py           # end-to-end training/evaluation CLI
-└── score.py         # inference CLI for saved models
+├── score.py         # inference CLI for saved models
+├── regime_labels.py # state names, colours, plain-language descriptions
+├── brief.py         # trader-readable regime brief CLI
+└── regime_quality.py# regime-quality metrics + evaluation CLI
 tests/
 ├── test_package.py  # metadata + console-script registration
 ├── test_features.py
@@ -473,6 +576,8 @@ tests/
 ├── test_metadata.py # provenance record + output hashing
 ├── test_models.py   # model round-trip and payload validation
 ├── test_score.py    # scoring CLI and state carry-forward
+├── test_regime_quality.py # recovery, stability, calibration, consensus
+├── test_brief.py    # trader brief, consensus, disagreement, JSON schema
 └── test_cli.py      # end-to-end CLI including costs, models, metadata
 ```
 
@@ -498,8 +603,10 @@ The suite covers feature causality, walk-forward structure, HMM filtering
 continuity, scorecard math (including cost accounting), package/console-script
 registration, loader validation (duplicate dates, non-positive prices, bounded
 gap filling), run metadata/output hashing, model save/load round trips and
-payload validation, the scoring CLI (including state carry-forward), and the
-end-to-end training CLI.
+payload validation, the scoring CLI (including state carry-forward), the
+end-to-end training CLI, regime-quality metrics (recovery, transition lag,
+strict-majority consensus, calibration ranking, refit-day churn, event recall),
+and the trader brief (consensus, disagreement, stability, and JSON schema).
 
 To add a detector, implement the `BaseDetector` interface (including
 `_params_dict` and `from_dict`) in
